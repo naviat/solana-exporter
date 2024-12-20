@@ -55,16 +55,23 @@ func (c *Collector) initializeModules() {
         rpc.NewCollector(c.client, c.metrics, c.nodeLabels),
         health.NewCollector(c.client, c.metrics, c.nodeLabels),
         performance.NewCollector(c.client, c.metrics, c.nodeLabels),
-        system.NewCollector(c.metrics, c.config.System, c.nodeLabels),
+        system.NewCollector(c.metrics, struct {
+            EnableCPUMetrics     bool
+            EnableMemoryMetrics  bool
+            EnableDiskMetrics    bool
+            EnableNetworkMetrics bool
+        }{
+            EnableCPUMetrics:     c.config.System.EnableCPUMetrics,
+            EnableMemoryMetrics:  c.config.System.EnableMemoryMetrics,
+            EnableDiskMetrics:    c.config.System.EnableDiskMetrics,
+            EnableNetworkMetrics: c.config.System.EnableNetworkMetrics,
+        }, c.nodeLabels),
     }
 }
 
 func (c *Collector) Run(ctx context.Context) {
     ticker := time.NewTicker(c.interval)
     defer ticker.Stop()
-
-    // Create error channel for collecting errors from goroutines
-    errorCh := make(chan error, len(c.modules))
 
     log.Printf("Starting collector with %d modules, interval: %v", len(c.modules), c.interval)
 
@@ -74,24 +81,24 @@ func (c *Collector) Run(ctx context.Context) {
             log.Println("Collector received shutdown signal")
             return
         case <-ticker.C:
-            c.collect(ctx, errorCh)
-        case err := <-errorCh:
-            if err != nil {
-                log.Printf("Collection error: %v", err)
-            }
+            c.Collect(ctx)
         }
     }
 }
 
-func (c *Collector) collect(ctx context.Context) error {
+func (c *Collector) Collect(ctx context.Context) error {
     var wg sync.WaitGroup
     errCh := make(chan error, len(c.modules))
+    semaphore := make(chan struct{}, c.config.Collector.ConcurrentModules)
 
     // Run each module collector in its own goroutine
     for _, module := range c.modules {
         wg.Add(1)
         go func(m ModuleCollector) {
             defer wg.Done()
+
+            semaphore <- struct{}{}
+            defer func() { <-semaphore }()
 
             // Create timeout context for each collector
             moduleCtx, cancel := context.WithTimeout(ctx, c.config.Collector.TimeoutPerModule)
@@ -154,7 +161,7 @@ func (c *Collector) GetStatus() map[string]interface{} {
         "running":      true,
         "module_count": len(c.modules),
         "start_time":   c.startTime,
-        "uptime":      time.Since(c.startTime).String(),
-        "node_labels": c.nodeLabels,
+        "uptime":       time.Since(c.startTime).String(),
+        "node_labels":  c.nodeLabels,
     }
 }

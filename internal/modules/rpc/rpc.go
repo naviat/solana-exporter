@@ -101,7 +101,7 @@ func (c *Collector) Collect(ctx context.Context) error {
     wg.Add(1)
     go func() {
         defer wg.Done()
-        if err := c.measureRPCLatency(ctx); err != nil {
+        if err := c.measureRPCLatency(ctx, ""); err != nil {
             errCh <- fmt.Errorf("RPC latency measurement failed: %w", err)
         }
     }()
@@ -158,7 +158,7 @@ func (c *Collector) Collect(ctx context.Context) error {
             if err := collectFunc(ctx); err != nil {
                 errCh <- fmt.Errorf("%s failed: %w", collectorName, err)
             }
-        }(collectorName, collectFunc)
+        }()
     }
 
     wg.Wait()
@@ -172,8 +172,16 @@ func (c *Collector) measureRPCLatency(ctx context.Context, method string) error 
     var result json.RawMessage
 
     baseLabels := c.getBaseLabels()
-    category := methodCategories[method]
-    labels := append(baseLabels, method, category)
+    var labels []string
+    if method != "" {
+        category, ok := methodCategories[method]
+        if !ok {
+            category = "unknown"
+        }
+        labels = append(baseLabels, method, category)
+    } else {
+        labels = baseLabels
+    }
 
     err := c.client.Call(ctx, method, getDefaultParams(method), &result)
     duration := time.Since(start).Seconds()

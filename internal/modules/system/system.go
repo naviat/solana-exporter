@@ -11,6 +11,7 @@ import (
     "github.com/shirou/gopsutil/v3/disk"
     "github.com/shirou/gopsutil/v3/mem"
     "github.com/shirou/gopsutil/v3/net"
+    "github.com/shirou/gopsutil/v3/load"
     "github.com/shirou/gopsutil/v3/process"
 
     "solana-rpc-monitor/internal/metrics"
@@ -177,10 +178,10 @@ func (c *Collector) collectAdvancedSystemMetrics(ctx context.Context) error {
     baseLabels := c.getBaseLabels()
 
     // Collect load averages
-    if load, err := cpu.LoadAvg(); err == nil {
-        c.metrics.SystemLoad.WithLabelValues(append(baseLabels, "1min")...).Set(load.Load1)
-        c.metrics.SystemLoad.WithLabelValues(append(baseLabels, "5min")...).Set(load.Load5)
-        c.metrics.SystemLoad.WithLabelValues(append(baseLabels, "15min")...).Set(load.Load15)
+    if loadAvg, err := load.AvgWithContext(ctx); err == nil {
+        c.metrics.SystemLoad.WithLabelValues(append(baseLabels, "1min")...).Set(loadAvg.Load1)
+        c.metrics.SystemLoad.WithLabelValues(append(baseLabels, "5min")...).Set(loadAvg.Load5)
+        c.metrics.SystemLoad.WithLabelValues(append(baseLabels, "15min")...).Set(loadAvg.Load15)
     }
 
     // Collect TCP connection stats
