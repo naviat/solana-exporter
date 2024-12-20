@@ -22,21 +22,12 @@ type HealthResponse struct {
 }
 
 type VersionResponse struct {
-    SolanaCore    string `json:"solana-core"`
-    FeatureSet    uint32 `json:"feature-set"`
+    SolanaCore string `json:"solana-core"`
+    FeatureSet uint32 `json:"feature-set"`
 }
 
 type NodeIdentity struct {
     Identity string `json:"identity"`
-}
-
-type ClusterNode struct {
-    Pubkey       string `json:"pubkey"`
-    Gossip      string `json:"gossip"`
-    TPU         string `json:"tpu"`
-    RPC         string `json:"rpc"`
-    Version     string `json:"version"`
-    FeatureSet  uint32 `json:"featureSet"`
 }
 
 func NewCollector(client *solana.Client, metrics *metrics.Metrics, labels map[string]string) *Collector {
@@ -57,7 +48,7 @@ func (c *Collector) getBaseLabels() []string {
 
 func (c *Collector) Collect(ctx context.Context) error {
     var wg sync.WaitGroup
-    errCh := make(chan error, 4)
+    errCh := make(chan error, 3)
 
     // Collect node health
     wg.Add(1)
@@ -74,15 +65,6 @@ func (c *Collector) Collect(ctx context.Context) error {
         defer wg.Done()
         if err := c.collectVersion(ctx); err != nil {
             errCh <- fmt.Errorf("version check failed: %w", err)
-        }
-    }()
-
-    // Collect node identity and cluster info
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        if err := c.collectNodeInfo(ctx); err != nil {
-            errCh <- fmt.Errorf("node info check failed: %w", err)
         }
     }()
 
@@ -129,7 +111,6 @@ func (c *Collector) collectHealth(ctx context.Context) error {
         return err
     }
 
-    // Update health status
     if healthResp.Status == "ok" {
         c.metrics.NodeHealth.WithLabelValues(append(baseLabels, "ok")...).Set(1)
         c.metrics.NodeHealth.WithLabelValues(append(baseLabels, "error")...).Set(0)
@@ -157,42 +138,9 @@ func (c *Collector) collectVersion(ctx context.Context) error {
     }
 
     // Update version metrics
-    c.metrics.NodeVersion.Reset()
     c.metrics.NodeVersion.WithLabelValues(
         append(baseLabels, versionResp.SolanaCore, fmt.Sprintf("%d", versionResp.FeatureSet))...,
     ).Set(1)
-
-    return nil
-}
-
-func (c *Collector) collectNodeInfo(ctx context.Context) error {
-    // Get node identity
-    var identity NodeIdentity
-    err := c.client.Call(ctx, "getIdentity", nil, &identity)
-    if err != nil {
-        return fmt.Errorf("failed to get node identity: %w", err)
-    }
-
-    // Get cluster nodes
-    var nodes []ClusterNode
-    err = c.client.Call(ctx, "getClusterNodes", nil, &nodes)
-    if err != nil {
-        return fmt.Errorf("failed to get cluster nodes: %w", err)
-    }
-
-    baseLabels := c.getBaseLabels()
-
-    // Find current node in cluster nodes
-    for _, node := range nodes {
-        if node.Pubkey == identity.Identity {
-            if node.RPC != "" {
-                c.metrics.NodeHealth.WithLabelValues(append(baseLabels, "rpc_available")...).Set(1)
-            } else {
-                c.metrics.NodeHealth.WithLabelValues(append(baseLabels, "rpc_available")...).Set(0)
-            }
-            break
-        }
-    }
 
     return nil
 }
@@ -207,12 +155,6 @@ func (c *Collector) collectSystemHealth(ctx context.Context) error {
     c.metrics.MemoryUsage.WithLabelValues(append(baseLabels, "heap")...).Set(float64(m.HeapAlloc))
     c.metrics.MemoryUsage.WithLabelValues(append(baseLabels, "stack")...).Set(float64(m.StackInuse))
     c.metrics.MemoryUsage.WithLabelValues(append(baseLabels, "system")...).Set(float64(m.Sys))
-
-    // Goroutine count
-    c.metrics.GoroutineCount.WithLabelValues(baseLabels...).Set(float64(runtime.NumGoroutine()))
-
-    // Update uptime
-    c.metrics.LastRestartTime.WithLabelValues(baseLabels...).Set(float64(time.Now().Unix()))
 
     return nil
 }
