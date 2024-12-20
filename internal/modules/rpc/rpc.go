@@ -3,6 +3,7 @@ package rpc
 import (
     "context"
     "encoding/json"
+    "fmt"
     "sync"
     "time"
 
@@ -11,14 +12,26 @@ import (
 )
 
 type Collector struct {
-    client  *solana.Client
-    metrics *metrics.Metrics
+    client     *solana.Client
+    metrics    *metrics.Metrics
+    nodeLabels map[string]string
 }
 
-func NewCollector(client *solana.Client, metrics *metrics.Metrics) *Collector {
+// Common RPC methods to monitor
+var monitoredMethods = []string{
+    "getAccountInfo",
+    "getBalance",
+    "getBlockHeight",
+    "getSlot",
+    "getTransaction",
+    "getRecentBlockhash",
+}
+
+func NewCollector(client *solana.Client, metrics *metrics.Metrics, labels map[string]string) *Collector {
     return &Collector{
-        client:  client,
-        metrics: metrics,
+        client:     client,
+        metrics:    metrics,
+        nodeLabels: labels,
     }
 }
 
@@ -26,39 +39,36 @@ func (c *Collector) Name() string {
     return "rpc"
 }
 
-type RPCPayload struct {
-    Size int64
+func (c *Collector) getLabels(extraLabels ...string) []string {
+    baseLabels := []string{
+        c.nodeLabels["node_address"],
+        c.nodeLabels["org"],
+        c.nodeLabels["node_type"],
+    }
+    return append(baseLabels, extraLabels...)
 }
 
 func (c *Collector) Collect(ctx context.Context) error {
     var wg sync.WaitGroup
-    errCh := make(chan error, 3)
+    errCh := make(chan error, len(monitoredMethods)+2)
 
-    // Track common RPC methods
-    methods := []string{
-        "getSlot",
-        "getBlock",
-        "getTransaction",
-        "getBalance",
-        "getBlockHeight",
-    }
-
-    for _, method := range methods {
+    // Monitor RPC performance
+    for _, method := range monitoredMethods {
         wg.Add(1)
         go func(method string) {
             defer wg.Done()
             if err := c.measureRPCLatency(ctx, method); err != nil {
-                errCh <- err
+                errCh <- fmt.Errorf("RPC measurement failed for %s: %w", method, err)
             }
         }(method)
     }
 
-    // Collect request payload sizes
+    // Collect request sizes
     wg.Add(1)
     go func() {
         defer wg.Done()
         if err := c.measureRequestSizes(ctx); err != nil {
-            errCh <- err
+            errCh <- fmt.Errorf("request size measurement failed: %w", err)
         }
     }()
 
@@ -67,19 +77,23 @@ func (c *Collector) Collect(ctx context.Context) error {
     go func() {
         defer wg.Done()
         if err := c.trackInFlightRequests(ctx); err != nil {
-            errCh <- err
+            errCh <- fmt.Errorf("in-flight tracking failed: %w", err)
         }
     }()
 
-    // Wait for all collectors
     wg.Wait()
     close(errCh)
 
-    // Check for any errors
+    // Check for errors
+    var errs []error
     for err := range errCh {
         if err != nil {
-            return err
+            errs = append(errs, err)
         }
+    }
+
+    if len(errs) > 0 {
+        return fmt.Errorf("multiple collection errors: %v", errs)
     }
 
     return nil
@@ -89,17 +103,15 @@ func (c *Collector) measureRPCLatency(ctx context.Context, method string) error 
     start := time.Now()
     var result json.RawMessage
 
-    err := c.client.Call(ctx, method, nil, &result)
+    err := c.client.Call(ctx, method, getDefaultParams(method), &result)
     duration := time.Since(start).Seconds()
 
-    // Record latency
-    c.metrics.RPCLatency.WithLabelValues(method).Observe(duration)
-    
-    // Increment request counter
-    c.metrics.RPCRequests.WithLabelValues(method).Inc()
+    // Record metrics with metadata
+    c.metrics.RPCLatency.WithLabelValues(c.getLabels(method)...).Observe(duration)
+    c.metrics.RPCRequests.WithLabelValues(c.getLabels(method)...).Inc()
 
     if err != nil {
-        c.metrics.RPCErrors.WithLabelValues(method, "request_failed").Inc()
+        c.metrics.RPCErrors.WithLabelValues(c.getLabels(method, "request_failed")...).Inc()
         return err
     }
 
@@ -108,14 +120,14 @@ func (c *Collector) measureRPCLatency(ctx context.Context, method string) error 
 
 func (c *Collector) measureRequestSizes(ctx context.Context) error {
     // Sample different request types
-    requests := map[string]interface{}{
+    sampleRequests := map[string][]interface{}{
         "getRecentBlockhash": nil,
-        "getBlock": []interface{}{100},
-        "getTransaction": []interface{}{"transaction_signature"},
+        "getBlock": {100},
+        "getTransaction": {"sample_signature"},
     }
 
-    for method, params := range requests {
-        payload := RPCRequest{
+    for method, params := range sampleRequests {
+        payload := solana.RPCRequest{
             Jsonrpc: "2.0",
             ID:      1,
             Method:  method,
@@ -127,24 +139,36 @@ func (c *Collector) measureRequestSizes(ctx context.Context) error {
             continue
         }
 
-        c.metrics.RPCRequestSize.Observe(float64(len(data)))
+        c.metrics.RPCRequestSize.WithLabelValues(c.getLabels()...).Observe(float64(len(data)))
     }
 
     return nil
 }
 
 func (c *Collector) trackInFlightRequests(ctx context.Context) error {
-    // This would typically connect to RPC node's internal metrics
-    // For now, we'll estimate based on recent requests
-    var result struct {
-        Current int `json:"current"`
+    type rpcStats struct {
+        CurrentRequests int `json:"currentRequests"`
     }
 
-    err := c.client.Call(ctx, "getRecentPerformanceSamples", []interface{}{1}, &result)
+    var stats rpcStats
+    err := c.client.Call(ctx, "getResourceConsumption", nil, &stats)
     if err != nil {
         return err
     }
 
-    c.metrics.RPCInFlight.Set(float64(result.Current))
+    c.metrics.RPCInFlight.WithLabelValues(c.getLabels()...).Set(float64(stats.CurrentRequests))
     return nil
+}
+
+func getDefaultParams(method string) []interface{} {
+    switch method {
+    case "getAccountInfo":
+        return []interface{}{make([]byte, 32)} // Empty pubkey
+    case "getBlock":
+        return []interface{}{0} // Genesis block
+    case "getTransaction":
+        return []interface{}{make([]byte, 64)} // Empty signature
+    default:
+        return nil
+    }
 }

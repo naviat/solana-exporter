@@ -26,95 +26,166 @@ func (m *MockClient) Call(ctx context.Context, method string, params []interface
 
 func setupTest() (*MockClient, *metrics.Metrics, *Collector) {
     mockClient := new(MockClient)
-    reg := prometheus.NewRegistry()
-    metrics := metrics.NewMetrics(reg)
-    collector := NewCollector(mockClient, metrics)
+    registry := prometheus.NewRegistry()
+    metrics := metrics.NewMetrics(registry)
+    
+    labels := map[string]string{
+        "node_address": "test-node:8799",
+        "org":          "test-org",
+        "node_type":    "rpc",
+    }
+
+    collector := NewCollector(mockClient, metrics, labels)
     return mockClient, metrics, collector
 }
 
-func TestCollectTransactionMetrics(t *testing.T) {
+func TestPerformanceCollector_TransactionMetrics(t *testing.T) {
     mockClient, metrics, collector := setupTest()
 
     sampleData := []PerformanceSample{
         {
-            Slot:             100,
-            NumTransactions:  1000,
-            NumSlots:        10,
+            NumTransactions:   1000,
+            NumSlots:         10,
             SamplePeriodSecs: 10,
+            Slot:            100,
+        },
+        {
+            NumTransactions:   2000,
+            NumSlots:         10,
+            SamplePeriodSecs: 10,
+            Slot:            110,
         },
     }
 
     mockClient.On("Call",
         mock.Anything,
         "getRecentPerformanceSamples",
+        []interface{}{5},
         mock.Anything,
-        mock.Anything,
-    ).Return(func(interface{}) {
+    ).Return(func(result interface{}) {
         *(result.(*[]PerformanceSample)) = sampleData
     }, nil)
 
     err := collector.collectTransactionMetrics(context.Background())
-    
     assert.NoError(t, err)
-    assert.Equal(t, 100.0, metrics.TxThroughput.Get()) // 1000 tx / 10 sec = 100 TPS
-    mockClient.AssertExpectations(t)
+
+    // Verify TPS calculations
+    labels := []string{"test-node:8799", "test-org", "rpc"}
+    assert.Equal(t, float64(150), metrics.TxThroughput.WithLabelValues(labels...).Get()) // (100 + 200) / 2
 }
 
-func TestCollectBlockProcessingMetrics(t *testing.T) {
+func TestPerformanceCollector_SlotMetrics(t *testing.T) {
     mockClient, metrics, collector := setupTest()
 
+    // Mock current slot
     mockClient.On("Call",
         mock.Anything,
-        "getBlockTime",
+        "getSlot",
+        nil,
         mock.Anything,
-        mock.Anything,
-    ).Return(func(interface{}) {
-        *(result.(*struct{ Average float64 })) = struct{ Average float64 }{Average: 0.5}
+    ).Return(func(result interface{}) {
+        *(result.(*uint64)) = 100
     }, nil)
 
-    err := collector.collectBlockProcessingMetrics(context.Background())
-    
-    assert.NoError(t, err)
-    mockClient.AssertExpectations(t)
-}
-
-func TestCollectConfirmationMetrics(t *testing.T) {
-    mockClient, metrics, collector := setupTest()
-
+    // Mock network slot
     mockClient.On("Call",
         mock.Anything,
-        "getConfirmationTime",
+        "getSlot",
+        []interface{}{map[string]string{"commitment": "finalized"}},
         mock.Anything,
-        mock.Anything,
-    ).Return(func(interface{}) {
-        *(result.(*struct {
-            Mean   float64
-            Stddev float64
-        })) = struct {
-            Mean   float64
-            Stddev float64
-        }{Mean: 0.3, Stddev: 0.1}
+    ).Return(func(result interface{}) {
+        *(result.(*uint64)) = 105
     }, nil)
 
-    err := collector.collectConfirmationMetrics(context.Background())
-    
+    err := collector.collectSlotMetrics(context.Background())
     assert.NoError(t, err)
-    mockClient.AssertExpectations(t)
+
+    labels := []string{"test-node:8799", "test-org", "rpc"}
+    assert.Equal(t, float64(100), metrics.CurrentSlot.WithLabelValues(labels...).Get())
+    assert.Equal(t, float64(105), metrics.NetworkSlot.WithLabelValues(labels...).Get())
+    assert.Equal(t, float64(5), metrics.SlotDiff.WithLabelValues(labels...).Get())
 }
 
-func TestCollector_Collect(t *testing.T) {
+func TestPerformanceCollector_ErrorHandling(t *testing.T) {
     mockClient, _, collector := setupTest()
 
-    // Setup mocks for all methods
+    // Test transaction metrics error
+    mockClient.On("Call",
+        mock.Anything,
+        "getRecentPerformanceSamples",
+        mock.Anything,
+        mock.Anything,
+    ).Return(nil, assert.AnError)
+
+    err := collector.collectTransactionMetrics(context.Background())
+    assert.Error(t, err)
+}
+
+func TestPerformanceCollector_EmptySamples(t *testing.T) {
+    mockClient, metrics, collector := setupTest()
+
+    // Return empty samples
+    mockClient.On("Call",
+        mock.Anything,
+        "getRecentPerformanceSamples",
+        mock.Anything,
+        mock.Anything,
+    ).Return(func(result interface{}) {
+        *(result.(*[]PerformanceSample)) = []PerformanceSample{}
+    }, nil)
+
+    err := collector.collectTransactionMetrics(context.Background())
+    assert.NoError(t, err)
+
+    // Verify metrics weren't updated
+    labels := []string{"test-node:8799", "test-org", "rpc"}
+    assert.Equal(t, float64(0), metrics.TxThroughput.WithLabelValues(labels...).Get())
+}
+
+func TestPerformanceCollector_ConcurrentCollection(t *testing.T) {
+    mockClient, _, collector := setupTest()
+
+    // Setup mocks for concurrent calls
     mockClient.On("Call",
         mock.Anything,
         mock.Anything,
         mock.Anything,
         mock.Anything,
-    ).Return(nil)
+    ).Return(func(result interface{}) {
+        switch v := result.(type) {
+        case *[]PerformanceSample:
+            *v = []PerformanceSample{{
+                NumTransactions:   1000,
+                NumSlots:         10,
+                SamplePeriodSecs: 10,
+                Slot:            100,
+            }}
+        case *uint64:
+            *v = 100
+        }
+    }, nil)
 
-    err := collector.Collect(context.Background())
-    
-    assert.NoError(t, err)
-    mockClient.AssertExpectations(t)
+    // Run multiple collections concurrently
+    var wg sync.WaitGroup
+    for i := 0; i < 5; i++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            err := collector.Collect(context.Background())
+            assert.NoError(t, err)
+        }()
+    }
+    wg.Wait()
+}
+
+func TestPerformanceCollector_ContextTimeout(t *testing.T) {
+    _, _, collector := setupTest()
+
+    ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+    defer cancel()
+
+    time.Sleep(2 * time.Millisecond)
+    err := collector.Collect(ctx)
+    assert.Error(t, err)
+    assert.Contains(t, err.Error(), "context deadline exceeded")
 }

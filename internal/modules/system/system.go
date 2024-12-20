@@ -16,25 +16,40 @@ import (
 )
 
 type Collector struct {
-    metrics *metrics.Metrics
-    config  struct {
-        EnableDiskMetrics bool
-        EnableCPUMetrics  bool
+    metrics    *metrics.Metrics
+    nodeLabels map[string]string
+    config     struct {
+        EnableCPUMetrics     bool
+        EnableMemoryMetrics  bool
+        EnableDiskMetrics    bool
+        EnableNetworkMetrics bool
     }
 }
 
 func NewCollector(metrics *metrics.Metrics, config struct {
-    EnableDiskMetrics bool
-    EnableCPUMetrics  bool
-}) *Collector {
+    EnableCPUMetrics     bool
+    EnableMemoryMetrics  bool
+    EnableDiskMetrics    bool
+    EnableNetworkMetrics bool
+}, labels map[string]string) *Collector {
     return &Collector{
-        metrics: metrics,
-        config:  config,
+        metrics:    metrics,
+        nodeLabels: labels,
+        config:     config,
     }
 }
 
 func (c *Collector) Name() string {
     return "system"
+}
+
+func (c *Collector) getLabels(extraLabels ...string) []string {
+    baseLabels := []string{
+        c.nodeLabels["node_address"],
+        c.nodeLabels["org"],
+        c.nodeLabels["node_type"],
+    }
+    return append(baseLabels, extraLabels...)
 }
 
 func (c *Collector) Collect(ctx context.Context) error {
@@ -47,19 +62,21 @@ func (c *Collector) Collect(ctx context.Context) error {
         go func() {
             defer wg.Done()
             if err := c.collectCPUMetrics(ctx); err != nil {
-                errCh <- fmt.Errorf("cpu metrics: %w", err)
+                errCh <- fmt.Errorf("CPU metrics collection failed: %w", err)
             }
         }()
     }
 
     // Collect memory metrics
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        if err := c.collectMemoryMetrics(ctx); err != nil {
-            errCh <- fmt.Errorf("memory metrics: %w", err)
-        }
-    }()
+    if c.config.EnableMemoryMetrics {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            if err := c.collectMemoryMetrics(ctx); err != nil {
+                errCh <- fmt.Errorf("memory metrics collection failed: %w", err)
+            }
+        }()
+    }
 
     // Collect disk metrics
     if c.config.EnableDiskMetrics {
@@ -67,29 +84,35 @@ func (c *Collector) Collect(ctx context.Context) error {
         go func() {
             defer wg.Done()
             if err := c.collectDiskMetrics(ctx); err != nil {
-                errCh <- fmt.Errorf("disk metrics: %w", err)
+                errCh <- fmt.Errorf("disk metrics collection failed: %w", err)
             }
         }()
     }
 
     // Collect network metrics
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        if err := c.collectNetworkMetrics(ctx); err != nil {
-            errCh <- fmt.Errorf("network metrics: %w", err)
-        }
-    }()
+    if c.config.EnableNetworkMetrics {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            if err := c.collectNetworkMetrics(ctx); err != nil {
+                errCh <- fmt.Errorf("network metrics collection failed: %w", err)
+            }
+        }()
+    }
 
-    // Wait for all collectors
     wg.Wait()
     close(errCh)
 
-    // Check for any errors
+    // Check for errors
+    var errs []error
     for err := range errCh {
         if err != nil {
-            return err
+            errs = append(errs, err)
         }
+    }
+
+    if len(errs) > 0 {
+        return fmt.Errorf("multiple collection errors: %v", errs)
     }
 
     return nil
@@ -102,7 +125,9 @@ func (c *Collector) collectCPUMetrics(ctx context.Context) error {
     }
 
     for i, percentage := range percentages {
-        c.metrics.CPUUsage.WithLabelValues(fmt.Sprintf("cpu%d", i)).Set(percentage)
+        c.metrics.CPUUsage.WithLabelValues(
+            append(c.getLabels(), fmt.Sprintf("cpu%d", i))...,
+        ).Set(percentage)
     }
 
     return nil
@@ -114,16 +139,17 @@ func (c *Collector) collectMemoryMetrics(ctx context.Context) error {
         return err
     }
 
-    c.metrics.MemoryUsage.WithLabelValues("total").Set(float64(vmStat.Total))
-    c.metrics.MemoryUsage.WithLabelValues("used").Set(float64(vmStat.Used))
-    c.metrics.MemoryUsage.WithLabelValues("free").Set(float64(vmStat.Free))
-    c.metrics.MemoryUsage.WithLabelValues("cached").Set(float64(vmStat.Cached))
+    labels := c.getLabels()
+    c.metrics.MemoryUsage.WithLabelValues(append(labels, "total")...).Set(float64(vmStat.Total))
+    c.metrics.MemoryUsage.WithLabelValues(append(labels, "used")...).Set(float64(vmStat.Used))
+    c.metrics.MemoryUsage.WithLabelValues(append(labels, "free")...).Set(float64(vmStat.Free))
+    c.metrics.MemoryUsage.WithLabelValues(append(labels, "cached")...).Set(float64(vmStat.Cached))
 
     // Runtime memory stats
     var runtimeStats runtime.MemStats
     runtime.ReadMemStats(&runtimeStats)
-    c.metrics.MemoryUsage.WithLabelValues("heap").Set(float64(runtimeStats.HeapAlloc))
-    c.metrics.MemoryUsage.WithLabelValues("stack").Set(float64(runtimeStats.StackInuse))
+    c.metrics.MemoryUsage.WithLabelValues(append(labels, "heap")...).Set(float64(runtimeStats.HeapAlloc))
+    c.metrics.MemoryUsage.WithLabelValues(append(labels, "stack")...).Set(float64(runtimeStats.StackInuse))
 
     return nil
 }
@@ -140,7 +166,7 @@ func (c *Collector) collectDiskMetrics(ctx context.Context) error {
             continue
         }
 
-        labels := []string{partition.Mountpoint}
+        labels := append(c.getLabels(), partition.Mountpoint)
         c.metrics.DiskUsage.WithLabelValues(append(labels, "total")...).Set(float64(usage.Total))
         c.metrics.DiskUsage.WithLabelValues(append(labels, "used")...).Set(float64(usage.Used))
         c.metrics.DiskUsage.WithLabelValues(append(labels, "free")...).Set(float64(usage.Free))
@@ -153,8 +179,9 @@ func (c *Collector) collectDiskMetrics(ctx context.Context) error {
     }
 
     for device, stats := range ioStats {
-        c.metrics.DiskIOPS.WithLabelValues(device, "read").Set(float64(stats.ReadCount))
-        c.metrics.DiskIOPS.WithLabelValues(device, "write").Set(float64(stats.WriteCount))
+        labels := append(c.getLabels(), device)
+        c.metrics.DiskIOPS.WithLabelValues(append(labels, "read")...).Set(float64(stats.ReadCount))
+        c.metrics.DiskIOPS.WithLabelValues(append(labels, "write")...).Set(float64(stats.WriteCount))
     }
 
     return nil
@@ -167,10 +194,9 @@ func (c *Collector) collectNetworkMetrics(ctx context.Context) error {
     }
 
     for _, stat := range netStats {
-        c.metrics.NetworkIO.WithLabelValues(stat.Name, "bytes_sent").Add(float64(stat.BytesSent))
-        c.metrics.NetworkIO.WithLabelValues(stat.Name, "bytes_recv").Add(float64(stat.BytesRecv))
-        c.metrics.NetworkIO.WithLabelValues(stat.Name, "packets_sent").Add(float64(stat.PacketsSent))
-        c.metrics.NetworkIO.WithLabelValues(stat.Name, "packets_recv").Add(float64(stat.PacketsRecv))
+        labels := c.getLabels()
+        c.metrics.NetworkIO.WithLabelValues(append(labels, stat.Name, "sent")...).Add(float64(stat.BytesSent))
+        c.metrics.NetworkIO.WithLabelValues(append(labels, stat.Name, "received")...).Add(float64(stat.BytesRecv))
     }
 
     return nil

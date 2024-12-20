@@ -27,6 +27,6 @@ COPY config/config.yaml ./config/
 RUN adduser -D -u 1000 monitor
 USER monitor
 
-EXPOSE 9090
+EXPOSE 8080
 
 ENTRYPOINT ["./solana-monitor"]

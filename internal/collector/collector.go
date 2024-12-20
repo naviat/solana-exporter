@@ -15,56 +15,55 @@ import (
     "solana-rpc-monitor/pkg/solana"
 )
 
-// Collector defines interfaces for module collectors
 type ModuleCollector interface {
     Collect(ctx context.Context) error
     Name() string
 }
 
-// Collector orchestrates all metric collection
 type Collector struct {
-    client    *solana.Client
-    metrics   *metrics.Metrics
-    config    *config.Config
-    modules   []ModuleCollector
-    interval  time.Duration
-    mu        sync.RWMutex
-    startTime time.Time
+    client     *solana.Client
+    metrics    *metrics.Metrics
+    config     *config.Config
+    modules    []ModuleCollector
+    interval   time.Duration
+    mu         sync.RWMutex
+    startTime  time.Time
+    nodeLabels map[string]string
 }
 
-// NewCollector creates a new collector instance
-func NewCollector(client *solana.Client, metrics *metrics.Metrics, cfg *config.Config) *Collector {
+func NewCollector(client *solana.Client, metrics *metrics.Metrics, cfg *config.Config, labels map[string]string) *Collector {
+	if labels == nil {
+        labels = make(map[string]string)
+    }
     c := &Collector{
-        client:    client,
-        metrics:   metrics,
-        config:    cfg,
-        interval:  cfg.Collector.Interval,
-        startTime: time.Now(),
+        client:     client,
+        metrics:    metrics,
+        config:     cfg,
+        interval:   cfg.Collector.Interval,
+        startTime:  time.Now(),
+        nodeLabels: labels,
     }
 
-    // Initialize module collectors
-    c.modules = []ModuleCollector{
-        rpc.NewCollector(client, metrics),
-        health.NewCollector(client, metrics),
-        performance.NewCollector(client, metrics),
-        system.NewCollector(metrics, cfg.System),
-    }
-
+    c.initializeModules()
     return c
 }
 
-// Run starts the collector
+func (c *Collector) initializeModules() {
+    c.modules = []ModuleCollector{
+        rpc.NewCollector(c.client, c.metrics, c.nodeLabels),
+        health.NewCollector(c.client, c.metrics, c.nodeLabels),
+        performance.NewCollector(c.client, c.metrics, c.nodeLabels),
+        system.NewCollector(c.metrics, c.config.System, c.nodeLabels),
+    }
+}
+
 func (c *Collector) Run(ctx context.Context) {
-    // Create ticker for regular collection
     ticker := time.NewTicker(c.interval)
     defer ticker.Stop()
 
-    // Create error channel for collecting errors from goroutines
     errorCh := make(chan error, len(c.modules))
-
     log.Printf("Starting collector with %d modules, interval: %v", len(c.modules), c.interval)
 
-    // Start collection loop
     for {
         select {
         case <-ctx.Done():
@@ -75,119 +74,75 @@ func (c *Collector) Run(ctx context.Context) {
         case err := <-errorCh:
             if err != nil {
                 log.Printf("Collection error: %v", err)
+                c.recordError(err)
             }
         }
     }
 }
 
-// collect runs all module collectors concurrently
 func (c *Collector) collect(ctx context.Context, errorCh chan<- error) {
     var wg sync.WaitGroup
+    
+    moduleCtx, cancel := context.WithTimeout(ctx, c.config.Collector.TimeoutPerModule)
+    defer cancel()
 
-    // Update uptime metric
-    c.metrics.UptimeSeconds.Add(float64(c.interval.Seconds()))
-
-    // Run each module collector in its own goroutine
+    semaphore := make(chan struct{}, c.config.Collector.ConcurrentModules)
+    
     for _, module := range c.modules {
         wg.Add(1)
         go func(m ModuleCollector) {
             defer wg.Done()
+            semaphore <- struct{}{} // Acquire
+            defer func() { <-semaphore }() // Release
 
-            // Create timeout context for each collector
-            moduleCtx, cancel := context.WithTimeout(ctx, c.interval)
-            defer cancel()
-
-            // Track collection time
             start := time.Now()
             err := m.Collect(moduleCtx)
             duration := time.Since(start)
 
-            // Record collection duration and status
-            c.recordCollectionMetrics(m.Name(), duration, err)
+            c.recordModuleMetrics(m.Name(), duration, err)
 
             if err != nil {
                 select {
                 case errorCh <- err:
                 default:
-                    // Channel is full, log the error
                     log.Printf("Error collecting %s metrics: %v", m.Name(), err)
                 }
             }
         }(module)
     }
 
-    // Wait for all collectors to finish
     wg.Wait()
 }
 
-// recordCollectionMetrics records metrics about the collection process itself
-func (c *Collector) recordCollectionMetrics(moduleName string, duration time.Duration, err error) {
-    labels := []string{moduleName}
-    
-    // Record collection duration
-    c.metrics.CollectionDuration.WithLabelValues(moduleName).Observe(duration.Seconds())
-    
-    // Record collection status (success = 1, failure = 0)
-    if err == nil {
-        c.metrics.CollectionSuccess.WithLabelValues(moduleName).Inc()
-        c.metrics.LastCollectionSuccess.WithLabelValues(moduleName).Set(1)
-    } else {
-        c.metrics.CollectionErrors.WithLabelValues(moduleName).Inc()
-        c.metrics.LastCollectionSuccess.WithLabelValues(moduleName).Set(0)
+func (c *Collector) recordModuleMetrics(moduleName string, duration time.Duration, err error) {
+    labels := []string{
+        c.nodeLabels["node_address"],
+        moduleName,
     }
 
-    // Update last collection timestamp
-    c.metrics.LastCollectionTimestamp.WithLabelValues(moduleName).Set(float64(time.Now().Unix()))
+    c.metrics.CollectionDuration.WithLabelValues(labels...).Observe(duration.Seconds())
+
+    if err == nil {
+        c.metrics.CollectionSuccess.WithLabelValues(labels...).Inc()
+    } else {
+        c.metrics.CollectionErrors.WithLabelValues(labels...).Inc()
+    }
 }
 
-// Status returns current collector status
-type Status struct {
-    Running        bool      `json:"running"`
-    ModuleCount    int       `json:"module_count"`
-    StartTime      time.Time `json:"start_time"`
-    Uptime         string    `json:"uptime"`
-    LastCollection time.Time `json:"last_collection"`
+func (c *Collector) recordError(err error) {
+    c.metrics.CollectorErrors.Inc()
+    // Additional error handling if needed
 }
 
-// GetStatus returns the current status of the collector
-func (c *Collector) GetStatus() Status {
+func (c *Collector) GetStatus() map[string]interface{} {
     c.mu.RLock()
     defer c.mu.RUnlock()
 
-    return Status{
-        Running:     true,
-        ModuleCount: len(c.modules),
-        StartTime:   c.startTime,
-        Uptime:      time.Since(c.startTime).String(),
+    return map[string]interface{}{
+        "running":      true,
+        "module_count": len(c.modules),
+        "start_time":   c.startTime,
+        "uptime":      time.Since(c.startTime).String(),
+        "node_labels": c.nodeLabels,
     }
-}
-
-// AddModule adds a new collector module
-func (c *Collector) AddModule(module ModuleCollector) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-    c.modules = append(c.modules, module)
-}
-
-// RemoveModule removes a collector module by name
-func (c *Collector) RemoveModule(name string) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-
-    for i, m := range c.modules {
-        if m.Name() == name {
-            c.modules = append(c.modules[:i], c.modules[i+1:]...)
-            return
-        }
-    }
-}
-
-// Close performs any necessary cleanup
-func (c *Collector) Close() error {
-    c.mu.Lock()
-    defer c.mu.Unlock()
-
-    // Any cleanup needed for modules
-    c.modules = nil
-    return nil
 }

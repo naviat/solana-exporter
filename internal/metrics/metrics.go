@@ -264,3 +264,37 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 
     return m
 }
+
+// ResetMetrics resets all metrics for a given node
+func (m *Metrics) ResetMetrics(node string) {
+    labels := prometheus.Labels{"node": node}
+    m.RPCLatency.DeletePartialMatch(labels)
+    m.RPCRequests.DeletePartialMatch(labels)
+    m.RPCErrors.DeletePartialMatch(labels)
+    m.NodeHealth.DeletePartialMatch(labels)
+    m.CurrentSlot.DeletePartialMatch(labels)
+    m.SlotDiff.DeletePartialMatch(labels)
+    m.RPCInFlight.DeletePartialMatch(labels)
+    m.RPCRequestSize.DeletePartialMatch(labels)
+    m.RPCResponseSize.DeletePartialMatch(labels)
+    m.NodeVersion.DeletePartialMatch(labels)
+    m.LastRestartTime.DeletePartialMatch(labels)
+    m.UptimeSeconds.DeletePartialMatch(labels)
+    m.NetworkSlot.DeletePartialMatch(labels)
+    m.BlockProcessingTime.DeletePartialMatch(labels)
+    m.TxCount.DeletePartialMatch(labels)
+    m.TxSuccessRate.DeletePartialMatch(labels)
+    m.TxPerSlot.DeletePartialMatch(labels)
+    m.TxConfirmationTime.DeletePartialMatch(labels)
+    m.CPUUsage.DeletePartialMatch(labels)
+    m.MemoryUsage.DeletePartialMatch(labels)
+    m.DiskUsage.DeletePartialMatch(labels)
+    m.NetworkIO.DeletePartialMatch(labels)
+    m.WSConnections.DeletePartialMatch(labels)
+    m.WSMessageRate.DeletePartialMatch(labels)
+}
+
+// RemoveNodeMetrics removes all metrics for a given node
+func (m *Metrics) RemoveNodeMetrics(node string) {
+    m.ResetMetrics(node)
+}

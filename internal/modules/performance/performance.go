@@ -2,6 +2,7 @@ package performance
 
 import (
     "context"
+    "fmt"
     "sync"
     "time"
 
@@ -10,26 +11,23 @@ import (
 )
 
 type Collector struct {
-    client  *solana.Client
-    metrics *metrics.Metrics
+    client     *solana.Client
+    metrics    *metrics.Metrics
+    nodeLabels map[string]string
 }
 
 type PerformanceSample struct {
-    Slot              uint64  `json:"slot"`
     NumTransactions   uint64  `json:"numTransactions"`
-    NumSlots          uint64  `json:"numSlots"`
-    SamplePeriodSecs  float64 `json:"samplePeriodSecs"`
+    NumSlots         uint64  `json:"numSlots"`
+    SamplePeriodSecs float64 `json:"samplePeriodSecs"`
+    Slot            uint64  `json:"slot"`
 }
 
-type TransactionError struct {
-    Count   uint64 `json:"count"`
-    Message string `json:"message"`
-}
-
-func NewCollector(client *solana.Client, metrics *metrics.Metrics) *Collector {
+func NewCollector(client *solana.Client, metrics *metrics.Metrics, labels map[string]string) *Collector {
     return &Collector{
-        client:  client,
-        metrics: metrics,
+        client:     client,
+        metrics:    metrics,
+        nodeLabels: labels,
     }
 }
 
@@ -37,42 +35,42 @@ func (c *Collector) Name() string {
     return "performance"
 }
 
+func (c *Collector) getLabels(extraLabels ...string) []string {
+    baseLabels := []string{
+        c.nodeLabels["node_address"],
+        c.nodeLabels["org"],
+        c.nodeLabels["node_type"],
+    }
+    return append(baseLabels, extraLabels...)
+}
+
 func (c *Collector) Collect(ctx context.Context) error {
     var wg sync.WaitGroup
-    errCh := make(chan error, 4)
+    errCh := make(chan error, 3)
 
-    // Collect TPS metrics
+    // Collect transaction metrics
     wg.Add(1)
     go func() {
         defer wg.Done()
         if err := c.collectTransactionMetrics(ctx); err != nil {
-            errCh <- err
+            errCh <- fmt.Errorf("transaction metrics failed: %w", err)
         }
     }()
 
-    // Collect block processing metrics
+    // Collect slot metrics
     wg.Add(1)
     go func() {
         defer wg.Done()
-        if err := c.collectBlockProcessingMetrics(ctx); err != nil {
-            errCh <- err
+        if err := c.collectSlotMetrics(ctx); err != nil {
+            errCh <- fmt.Errorf("slot metrics failed: %w", err)
         }
     }()
 
-    // Collect confirmation times
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        if err := c.collectConfirmationMetrics(ctx); err != nil {
-            errCh <- err
-        }
-    }()
-
-    // Wait for all collectors
+    // Wait for collectors
     wg.Wait()
     close(errCh)
 
-    // Check for any errors
+    // Check for errors
     for err := range errCh {
         if err != nil {
             return err
@@ -83,9 +81,17 @@ func (c *Collector) Collect(ctx context.Context) error {
 }
 
 func (c *Collector) collectTransactionMetrics(ctx context.Context) error {
+    start := time.Now()
     var samples []PerformanceSample
+
     err := c.client.Call(ctx, "getRecentPerformanceSamples", []interface{}{5}, &samples)
+    duration := time.Since(start).Seconds()
+
+    // Record RPC latency with metadata
+    c.metrics.RPCLatency.WithLabelValues(c.getLabels("getRecentPerformanceSamples")...).Observe(duration)
+
     if err != nil {
+        c.metrics.RPCErrors.WithLabelValues(c.getLabels("getRecentPerformanceSamples", "request_failed")...).Inc()
         return err
     }
 
@@ -94,42 +100,41 @@ func (c *Collector) collectTransactionMetrics(ctx context.Context) error {
         for _, sample := range samples {
             tps := float64(sample.NumTransactions) / sample.SamplePeriodSecs
             totalTPS += tps
-            c.metrics.TxThroughput.Set(tps)
-            c.metrics.TxPerSlot.WithLabelValues("processed").Observe(float64(sample.NumTransactions) / float64(sample.NumSlots))
+
+            // Record metrics with metadata
+            c.metrics.TxThroughput.WithLabelValues(c.getLabels()...).Set(tps)
+            c.metrics.TxPerSlot.WithLabelValues(c.getLabels("processed")...).
+                Observe(float64(sample.NumTransactions) / float64(sample.NumSlots))
         }
 
-        // Set average TPS
-        c.metrics.TxThroughput.Set(totalTPS / float64(len(samples)))
+        // Set average TPS with metadata
+        c.metrics.TxThroughput.WithLabelValues(c.getLabels()...).
+            Set(totalTPS / float64(len(samples)))
     }
 
     return nil
 }
 
-func (c *Collector) collectBlockProcessingMetrics(ctx context.Context) error {
-    var blockTime struct {
-        Average float64 `json:"average"`
-    }
+func (c *Collector) collectSlotMetrics(ctx context.Context) error {
+    start := time.Now()
+    var currentSlot, networkSlot uint64
 
-    err := c.client.Call(ctx, "getBlockTime", []interface{}{}, &blockTime)
+    // Get current slot
+    err := c.client.Call(ctx, "getSlot", nil, &currentSlot)
     if err != nil {
         return err
     }
 
-    c.metrics.BlockProcessingTime.Observe(blockTime.Average)
-    return nil
-}
-
-func (c *Collector) collectConfirmationMetrics(ctx context.Context) error {
-    var confirmationTime struct {
-        Mean   float64 `json:"mean"`
-        Stddev float64 `json:"stddev"`
-    }
-
-    err := c.client.Call(ctx, "getConfirmationTime", []interface{}{}, &confirmationTime)
+    // Get network slot
+    err = c.client.Call(ctx, "getSlot", []interface{}{map[string]string{"commitment": "finalized"}}, &networkSlot)
     if err != nil {
         return err
     }
 
-    c.metrics.TxConfirmationTime.Observe(confirmationTime.Mean)
+    // Record metrics with metadata
+    c.metrics.CurrentSlot.WithLabelValues(c.getLabels()...).Set(float64(currentSlot))
+    c.metrics.NetworkSlot.WithLabelValues(c.getLabels()...).Set(float64(networkSlot))
+    c.metrics.SlotDiff.WithLabelValues(c.getLabels()...).Set(float64(networkSlot - currentSlot))
+
     return nil
 }

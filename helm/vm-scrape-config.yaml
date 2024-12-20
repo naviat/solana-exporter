@@ -5,9 +5,19 @@ metadata:
   namespace: monitoring
 spec:
   podMetricsEndpoints:
-  - port: metrics
-    path: /metrics
+  - port: metrics  # Make sure pod port name matches
+    path: /solana/
     interval: 15s
+    relabelConfigs:
+      - action: replace
+        sourceLabels: ["__address__"]
+        targetLabel: "__param_node_address"
+      - action: replace
+        sourceLabels: ["__scheme__"]
+        targetLabel: "__param_node_scheme"
+      - action: replace
+        replacement: "solana-rpc-exporter.monitoring.svc.cluster.local:8080"
+        targetLabel: "__address__"
   selector:
     matchLabels:
       app: solana-rpc-exporter

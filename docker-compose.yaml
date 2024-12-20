@@ -5,11 +5,11 @@ services:
     build: .
     container_name: solana-rpc-monitor
     ports:
-      - "9090:9090"
+      - "8080:8080"
     volumes:
       - ./config:/app/config
     environment:
-      - SOLANA_RPC_ENDPOINT=http://solana-rpc:8899
+      - SOLANA_RPC_ENDPOINT=http://solana-rpc:8799
     restart: unless-stopped
     networks:
       - monitoring
@@ -18,7 +18,7 @@ services:
     image: prom/prometheus:v2.45.0
     container_name: prometheus
     ports:
-      - "9091:9090"
+      - "9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
       - prometheus_data:/prometheus

@@ -35,7 +35,7 @@ spec:
         image: solana-rpc-exporter:latest
         ports:
         - name: metrics
-          containerPort: 9090
+          containerPort: 8080
         volumeMounts:
         - name: config
           mountPath: /app/config
@@ -61,7 +61,7 @@ metadata:
     app: solana-rpc-exporter
 spec:
   ports:
-  - port: 9090
+  - port: 8080
     name: metrics
     targetPort: metrics
   selector:

@@ -3,7 +3,7 @@ package health
 import (
     "context"
     "fmt"
-    "runtime"
+    "sync"
     "time"
 
     "solana-rpc-monitor/internal/metrics"
@@ -11,8 +11,9 @@ import (
 )
 
 type Collector struct {
-    client  *solana.Client
-    metrics *metrics.Metrics
+    client     *solana.Client
+    metrics    *metrics.Metrics
+    nodeLabels map[string]string
 }
 
 type HealthResponse struct {
@@ -20,14 +21,15 @@ type HealthResponse struct {
 }
 
 type VersionResponse struct {
-    SolanaCore    string            `json:"solana-core"`
-    FeatureSet    uint32           `json:"feature-set"`
+    SolanaCore string `json:"solana-core"`
+    FeatureSet uint32 `json:"feature-set"`
 }
 
-func NewCollector(client *solana.Client, metrics *metrics.Metrics) *Collector {
+func NewCollector(client *solana.Client, metrics *metrics.Metrics, labels map[string]string) *Collector {
     return &Collector{
-        client:  client,
-        metrics: metrics,
+        client:     client,
+        metrics:    metrics,
+        nodeLabels: labels,
     }
 }
 
@@ -35,9 +37,18 @@ func (c *Collector) Name() string {
     return "health"
 }
 
+func (c *Collector) getLabels(extraLabels ...string) []string {
+    baseLabels := []string{
+        c.nodeLabels["node_address"],
+        c.nodeLabels["org"],
+        c.nodeLabels["node_type"],
+    }
+    return append(baseLabels, extraLabels...)
+}
+
 func (c *Collector) Collect(ctx context.Context) error {
     var wg sync.WaitGroup
-    errCh := make(chan error, 3) // Buffer for potential errors
+    errCh := make(chan error, 3)
 
     // Collect health metrics
     wg.Add(1)
@@ -57,20 +68,11 @@ func (c *Collector) Collect(ctx context.Context) error {
         }
     }()
 
-    // Collect system health
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        if err := c.collectSystemHealth(ctx); err != nil {
-            errCh <- fmt.Errorf("system health check failed: %w", err)
-        }
-    }()
-
-    // Wait for all collectors to finish
+    // Wait for collectors
     wg.Wait()
     close(errCh)
 
-    // Check for any errors
+    // Check for errors
     for err := range errCh {
         if err != nil {
             return err
@@ -87,67 +89,47 @@ func (c *Collector) collectHealth(ctx context.Context) error {
     err := c.client.Call(ctx, "getHealth", nil, &healthResp)
     duration := time.Since(start).Seconds()
 
-    // Record RPC latency
-    c.metrics.RPCLatency.WithLabelValues("getHealth").Observe(duration)
+    // Record RPC latency with metadata
+    c.metrics.RPCLatency.WithLabelValues(c.getLabels("getHealth")...).Observe(duration)
 
     if err != nil {
-        c.metrics.NodeHealth.WithLabelValues("error").Set(0)
-        c.metrics.RPCErrors.WithLabelValues("getHealth", "request_failed").Inc()
+        c.metrics.NodeHealth.WithLabelValues(c.getLabels("error")...).Set(0)
+        c.metrics.RPCErrors.WithLabelValues(c.getLabels("getHealth", "request_failed")...).Inc()
         return err
     }
 
-    // Update health status
+    // Update health status with metadata
     if healthResp.Status == "ok" {
-        c.metrics.NodeHealth.WithLabelValues("ok").Set(1)
-        c.metrics.NodeHealth.WithLabelValues("error").Set(0)
+        c.metrics.NodeHealth.WithLabelValues(c.getLabels("ok")...).Set(1)
+        c.metrics.NodeHealth.WithLabelValues(c.getLabels("error")...).Set(0)
     } else {
-        c.metrics.NodeHealth.WithLabelValues("ok").Set(0)
-        c.metrics.NodeHealth.WithLabelValues("error").Set(1)
+        c.metrics.NodeHealth.WithLabelValues(c.getLabels("ok")...).Set(0)
+        c.metrics.NodeHealth.WithLabelValues(c.getLabels("error")...).Set(1)
     }
 
     return nil
 }
 
 func (c *Collector) collectVersion(ctx context.Context) error {
+    start := time.Now()
     var versionResp VersionResponse
 
-    start := time.Now()
     err := c.client.Call(ctx, "getVersion", nil, &versionResp)
     duration := time.Since(start).Seconds()
 
-    c.metrics.RPCLatency.WithLabelValues("getVersion").Observe(duration)
+    // Record RPC latency with metadata
+    c.metrics.RPCLatency.WithLabelValues(c.getLabels("getVersion")...).Observe(duration)
 
     if err != nil {
-        c.metrics.RPCErrors.WithLabelValues("getVersion", "request_failed").Inc()
+        c.metrics.RPCErrors.WithLabelValues(c.getLabels("getVersion", "request_failed")...).Inc()
         return err
     }
 
-    // Update version metrics
+    // Update version metrics with metadata
     c.metrics.NodeVersion.Reset()
     c.metrics.NodeVersion.WithLabelValues(
-        versionResp.SolanaCore,
-        fmt.Sprintf("%d", versionResp.FeatureSet),
+        append(c.getLabels(), versionResp.SolanaCore, fmt.Sprintf("%d", versionResp.FeatureSet))...,
     ).Set(1)
-
-    return nil
-}
-
-func (c *Collector) collectSystemHealth(ctx context.Context) error {
-    // Collect system metrics
-    var m runtime.MemStats
-    runtime.ReadMemStats(&m)
-
-    // Update memory metrics
-    c.metrics.MemoryUsage.WithLabelValues("heap").Set(float64(m.HeapAlloc))
-    c.metrics.MemoryUsage.WithLabelValues("stack").Set(float64(m.StackInuse))
-    c.metrics.MemoryUsage.WithLabelValues("system").Set(float64(m.Sys))
-
-    // Update goroutine count
-    c.metrics.GoroutineCount.Set(float64(runtime.NumGoroutine()))
-
-    // Get current time for uptime calculation
-    currentTime := time.Now().Unix()
-    c.metrics.LastRestartTime.Set(float64(currentTime))
 
     return nil
 }
