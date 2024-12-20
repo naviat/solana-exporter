@@ -2,6 +2,7 @@ package performance
 
 import (
     "context"
+    "fmt"
     "sync"
     "time"
 
@@ -10,8 +11,9 @@ import (
 )
 
 type Collector struct {
-    client  *solana.Client
-    metrics *metrics.Metrics
+    client     *solana.Client
+    metrics    *metrics.Metrics
+    nodeLabels map[string]string
 }
 
 type PerformanceSample struct {
@@ -21,15 +23,23 @@ type PerformanceSample struct {
     SamplePeriodSecs  float64 `json:"samplePeriodSecs"`
 }
 
-type TransactionError struct {
-    Count   uint64 `json:"count"`
-    Message string `json:"message"`
+type BlockProductionStats struct {
+    NumBlocks     uint64  `json:"numBlocks"`
+    NumSlots      uint64  `json:"numSlots"`
+    SamplePeriod  float64 `json:"samplePeriodSecs"`
 }
 
-func NewCollector(client *solana.Client, metrics *metrics.Metrics) *Collector {
+type TransactionStats struct {
+    Confirmed   uint64 `json:"numTransactionsConfirmed"`
+    Failed      uint64 `json:"numTransactionsFailed"`
+    ProcessTime float64 `json:"avgTransactionProcessTime"`
+}
+
+func NewCollector(client *solana.Client, metrics *metrics.Metrics, labels map[string]string) *Collector {
     return &Collector{
-        client:  client,
-        metrics: metrics,
+        client:     client,
+        metrics:    metrics,
+        nodeLabels: labels,
     }
 }
 
@@ -37,46 +47,62 @@ func (c *Collector) Name() string {
     return "performance"
 }
 
+func (c *Collector) getBaseLabels() []string {
+    return []string{c.nodeLabels["node_address"]}
+}
+
 func (c *Collector) Collect(ctx context.Context) error {
     var wg sync.WaitGroup
     errCh := make(chan error, 4)
 
-    // Collect TPS metrics
+    // Collect transaction performance
     wg.Add(1)
     go func() {
         defer wg.Done()
         if err := c.collectTransactionMetrics(ctx); err != nil {
-            errCh <- err
+            errCh <- fmt.Errorf("transaction metrics: %w", err)
         }
     }()
 
-    // Collect block processing metrics
+    // Collect block performance
     wg.Add(1)
     go func() {
         defer wg.Done()
-        if err := c.collectBlockProcessingMetrics(ctx); err != nil {
-            errCh <- err
+        if err := c.collectBlockMetrics(ctx); err != nil {
+            errCh <- fmt.Errorf("block metrics: %w", err)
         }
     }()
 
-    // Collect confirmation times
+    // Collect slot performance
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        if err := c.collectSlotMetrics(ctx); err != nil {
+            errCh <- fmt.Errorf("slot metrics: %w", err)
+        }
+    }()
+
+    // Collect confirmation performance
     wg.Add(1)
     go func() {
         defer wg.Done()
         if err := c.collectConfirmationMetrics(ctx); err != nil {
-            errCh <- err
+            errCh <- fmt.Errorf("confirmation metrics: %w", err)
         }
     }()
 
-    // Wait for all collectors
     wg.Wait()
     close(errCh)
 
-    // Check for any errors
+    var errs []error
     for err := range errCh {
         if err != nil {
-            return err
+            errs = append(errs, err)
         }
+    }
+
+    if len(errs) > 0 {
+        return fmt.Errorf("multiple collection errors: %v", errs)
     }
 
     return nil
@@ -89,47 +115,104 @@ func (c *Collector) collectTransactionMetrics(ctx context.Context) error {
         return err
     }
 
+    baseLabels := c.getBaseLabels()
+
     if len(samples) > 0 {
         var totalTPS float64
         for _, sample := range samples {
             tps := float64(sample.NumTransactions) / sample.SamplePeriodSecs
             totalTPS += tps
-            c.metrics.TxThroughput.Set(tps)
-            c.metrics.TxPerSlot.WithLabelValues("processed").Observe(float64(sample.NumTransactions) / float64(sample.NumSlots))
+
+            c.metrics.TxThroughput.WithLabelValues(baseLabels...).Set(tps)
+            c.metrics.TxPerSlot.WithLabelValues(append(baseLabels, "processed")...).
+                Observe(float64(sample.NumTransactions) / float64(sample.NumSlots))
         }
 
-        // Set average TPS
-        c.metrics.TxThroughput.Set(totalTPS / float64(len(samples)))
+        c.metrics.TxThroughput.WithLabelValues(baseLabels...).
+            Set(totalTPS / float64(len(samples)))
     }
 
-    return nil
-}
-
-func (c *Collector) collectBlockProcessingMetrics(ctx context.Context) error {
-    var blockTime struct {
-        Average float64 `json:"average"`
-    }
-
-    err := c.client.Call(ctx, "getBlockTime", []interface{}{}, &blockTime)
+    // Collect additional transaction stats
+    var txStats TransactionStats
+    err = c.client.Call(ctx, "getTransactionCount", []interface{}{map[string]string{"commitment": "processed"}}, &txStats)
     if err != nil {
         return err
     }
 
-    c.metrics.BlockProcessingTime.Observe(blockTime.Average)
+    c.metrics.TxSuccessRate.WithLabelValues(baseLabels...).
+        Set(float64(txStats.Confirmed) / float64(txStats.Confirmed+txStats.Failed) * 100)
+    c.metrics.TxErrorRate.WithLabelValues(baseLabels...).
+        Set(float64(txStats.Failed) / float64(txStats.Confirmed+txStats.Failed) * 100)
+    c.metrics.TxConfirmationTime.WithLabelValues(baseLabels...).
+        Observe(txStats.ProcessTime)
+
+    return nil
+}
+
+func (c *Collector) collectBlockMetrics(ctx context.Context) error {
+    var blockStats BlockProductionStats
+    err := c.client.Call(ctx, "getBlockProduction", nil, &blockStats)
+    if err != nil {
+        return err
+    }
+
+    baseLabels := c.getBaseLabels()
+
+    blockRate := float64(blockStats.NumBlocks) / blockStats.SamplePeriod
+    c.metrics.BlockProcessingTime.WithLabelValues(baseLabels...).
+        Observe(blockStats.SamplePeriod / float64(blockStats.NumBlocks))
+
+    // Get current block height
+    var blockHeight uint64
+    err = c.client.Call(ctx, "getBlockHeight", nil, &blockHeight)
+    if err != nil {
+        return err
+    }
+
+    c.metrics.BlockHeight.WithLabelValues(baseLabels...).Set(float64(blockHeight))
+
+    return nil
+}
+
+func (c *Collector) collectSlotMetrics(ctx context.Context) error {
+    // Get current and network slots
+    var currentSlot, networkSlot uint64
+    
+    err := c.client.Call(ctx, "getSlot", nil, &currentSlot)
+    if err != nil {
+        return err
+    }
+
+    err = c.client.Call(ctx, "getSlot", []interface{}{map[string]string{"commitment": "finalized"}}, &networkSlot)
+    if err != nil {
+        return err
+    }
+
+    baseLabels := c.getBaseLabels()
+    
+    c.metrics.CurrentSlot.WithLabelValues(baseLabels...).Set(float64(currentSlot))
+    c.metrics.NetworkSlot.WithLabelValues(baseLabels...).Set(float64(networkSlot))
+    c.metrics.SlotDiff.WithLabelValues(baseLabels...).Set(float64(networkSlot - currentSlot))
+
     return nil
 }
 
 func (c *Collector) collectConfirmationMetrics(ctx context.Context) error {
-    var confirmationTime struct {
+    // Get confirmation performance
+    type ConfirmationStats struct {
         Mean   float64 `json:"mean"`
         Stddev float64 `json:"stddev"`
     }
 
-    err := c.client.Call(ctx, "getConfirmationTime", []interface{}{}, &confirmationTime)
+    var stats ConfirmationStats
+    err := c.client.Call(ctx, "getConfirmationTimeStats", nil, &stats)
     if err != nil {
         return err
     }
 
-    c.metrics.TxConfirmationTime.Observe(confirmationTime.Mean)
+    baseLabels := c.getBaseLabels()
+    
+    c.metrics.TxConfirmationTime.WithLabelValues(baseLabels...).Observe(stats.Mean)
+
     return nil
 }

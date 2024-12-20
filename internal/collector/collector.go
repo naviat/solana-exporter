@@ -122,22 +122,15 @@ func (c *Collector) collect(ctx context.Context, errorCh chan<- error) {
 
 // recordCollectionMetrics records metrics about the collection process itself
 func (c *Collector) recordCollectionMetrics(moduleName string, duration time.Duration, err error) {
-    labels := []string{moduleName}
+    labels := []string{c.nodeLabels["node_address"], moduleName}
     
-    // Record collection duration
-    c.metrics.CollectionDuration.WithLabelValues(moduleName).Observe(duration.Seconds())
+    c.metrics.CollectionDuration.WithLabelValues(labels...).Observe(duration.Seconds())
     
-    // Record collection status (success = 1, failure = 0)
     if err == nil {
-        c.metrics.CollectionSuccess.WithLabelValues(moduleName).Inc()
-        c.metrics.LastCollectionSuccess.WithLabelValues(moduleName).Set(1)
+        c.metrics.CollectionSuccess.WithLabelValues(labels...).Inc()
     } else {
-        c.metrics.CollectionErrors.WithLabelValues(moduleName).Inc()
-        c.metrics.LastCollectionSuccess.WithLabelValues(moduleName).Set(0)
+        c.metrics.CollectionErrors.WithLabelValues(labels...).Inc()
     }
-
-    // Update last collection timestamp
-    c.metrics.LastCollectionTimestamp.WithLabelValues(moduleName).Set(float64(time.Now().Unix()))
 }
 
 // Status returns current collector status
