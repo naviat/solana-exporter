@@ -1,0 +1,14 @@
+rpc:
+  endpoint: "http://localhost:8899"
+  timeout: 30s
+
+metrics:
+  port: 9999
+  path: "/metrics"
+
+collector:
+  interval: 15s
+
+system:
+  enable_disk_metrics: true
+  enable_cpu_metrics: true

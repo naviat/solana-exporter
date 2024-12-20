@@ -1,0 +1,109 @@
+{
+	"annotations": {
+		"list": []
+	},
+	"title": "Solana RPC Metrics",
+	"panels": [
+		{
+			"title": "Transaction Rate by Node",
+			"type": "graph",
+			"gridPos": {
+				"x": 0,
+				"y": 0,
+				"w": 12,
+				"h": 8
+			},
+			"targets": [
+				{
+					"expr": "rate(solana_transaction_count{org=~\"$org\", node_type=~\"$node_type\"}[5m])",
+					"legendFormat": "{{instance}}",
+					"interval": ""
+				}
+			]
+		},
+		{
+			"title": "RPC Latency Distribution",
+			"type": "heatmap",
+			"gridPos": {
+				"x": 12,
+				"y": 0,
+				"w": 12,
+				"h": 8
+			},
+			"targets": [
+				{
+					"expr": "sum by (le) (rate(solana_rpc_latency_seconds_bucket{method=~\"$method\"}[5m]))",
+					"format": "heatmap",
+					"legendFormat": "{{le}}"
+				}
+			]
+		},
+		{
+			"title": "Error Rate by Method",
+			"type": "timeseries",
+			"gridPos": {
+				"x": 0,
+				"y": 8,
+				"w": 12,
+				"h": 8
+			},
+			"targets": [
+				{
+					"expr": "sum by (method) (rate(solana_rpc_errors_total[5m]))",
+					"legendFormat": "{{method}}"
+				}
+			]
+		},
+		{
+			"title": "Node Health Status",
+			"type": "stat",
+			"gridPos": {
+				"x": 12,
+				"y": 8,
+				"w": 6,
+				"h": 4
+			},
+			"targets": [
+				{
+					"expr": "solana_node_health{status=\"ok\"}"
+				}
+			],
+			"thresholds": {
+				"steps": [
+					{
+						"value": 0,
+						"color": "red"
+					},
+					{
+						"value": 1,
+						"color": "green"
+					}
+				]
+			}
+		}
+	],
+	"templating": {
+		"list": [
+			{
+				"name": "org",
+				"type": "query",
+				"query": "label_values(solana_node_health, org)"
+			},
+			{
+				"name": "node_type",
+				"type": "query",
+				"query": "label_values(solana_node_health, node_type)"
+			},
+			{
+				"name": "method",
+				"type": "query",
+				"query": "label_values(solana_rpc_latency_seconds_count, method)"
+			}
+		]
+	},
+	"time": {
+		"from": "now-6h",
+		"to": "now"
+	},
+	"refresh": "30s"
+}

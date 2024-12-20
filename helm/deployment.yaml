@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: solana-rpc-exporter-config
+  namespace: monitoring
+data:
+  config.yaml: |
+    rpc:
+      endpoint: "http://your-solana-rpc:8799"  # Replace with your RPC endpoint
+      timeout: 30s
+    metrics:
+      port: 9999
+      path: "/metrics"
+    collector:
+      interval: 15s
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: solana-rpc-exporter
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: solana-rpc-exporter
+  template:
+    metadata:
+      labels:
+        app: solana-rpc-exporter
+    spec:
+      containers:
+      - name: exporter
+        image: solana-rpc-exporter:latest
+        ports:
+        - name: metrics
+          containerPort: 9090
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 200m
+            memory: 256Mi
+      volumes:
+      - name: config
+        configMap:
+          name: solana-rpc-exporter-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: solana-rpc-exporter
+  namespace: monitoring
+  labels:
+    app: solana-rpc-exporter
+spec:
+  ports:
+  - port: 9090
+    name: metrics
+    targetPort: metrics
+  selector:
+    app: solana-rpc-exporter
