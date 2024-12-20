@@ -40,11 +40,15 @@ type RPCError struct {
     Message string `json:"message"`
 }
 
+func (e *RPCError) Error() string {
+    return fmt.Sprintf("RPC error %d: %s", e.Code, e.Message)
+}
+
 func NewClient(endpoint string, timeout time.Duration, labels map[string]string) *Client {
     if labels == nil {
         labels = make(map[string]string)
     }
-
+    
     return &Client{
         endpoint: endpoint,
         httpClient: &http.Client{
@@ -124,33 +128,16 @@ func (c *Client) doCall(ctx context.Context, method string, params []interface{}
     }
 
     if rpcResp.Error != nil {
-        return fmt.Errorf("rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+        return rpcResp.Error
     }
 
-    if result != nil {
-        if err := json.Unmarshal(rpcResp.Result, result); err != nil {
-            return fmt.Errorf("unmarshal result: %w", err)
-        }
+    if result == nil {
+        return nil
+    }
+
+    if err := json.Unmarshal(rpcResp.Result, result); err != nil {
+        return fmt.Errorf("unmarshal result: %w", err)
     }
 
     return nil
-}
-
-// Helper methods for common RPC calls
-func (c *Client) GetHealth(ctx context.Context) (string, error) {
-    var result string
-    err := c.Call(ctx, "getHealth", nil, &result)
-    return result, err
-}
-
-func (c *Client) GetSlot(ctx context.Context) (uint64, error) {
-    var result uint64
-    err := c.Call(ctx, "getSlot", nil, &result)
-    return result, err
-}
-
-func (c *Client) GetVersion(ctx context.Context) (map[string]interface{}, error) {
-    var result map[string]interface{}
-    err := c.Call(ctx, "getVersion", nil, &result)
-    return result, err
 }

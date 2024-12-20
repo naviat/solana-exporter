@@ -8,6 +8,7 @@ import (
     "time"
 
     "solana-rpc-monitor/internal/metrics"
+    "solana-rpc-monitor/internal/modules/common"
     "solana-rpc-monitor/pkg/solana"
 )
 
@@ -17,99 +18,50 @@ type Collector struct {
     nodeLabels map[string]string
 }
 
-// Expanded RPC methods to monitor
+// Common RPC methods to monitor
 var monitoredMethods = []string{
     // Basic node information
     "getHealth",
     "getVersion",
     "getIdentity",
-    "getClusterNodes",
     
     // Block and slot information
     "getSlot",
     "getBlockHeight",
     "getBlock",
-    "getBlocks",
     "getBlockTime",
     "getRecentBlockhash",
-    "getFirstAvailableBlock",
-    "getLatestBlockhash",
     
     // Transaction related
     "getTransaction",
     "getSignaturesForAddress",
     "getRecentPerformanceSamples",
     "getTransactionCount",
-    "simulateTransaction",
-    "sendTransaction",
     
     // Account and program information
     "getAccountInfo",
     "getBalance",
     "getProgramAccounts",
-    "getTokenAccountBalance",
-    "getTokenAccountsByOwner",
-    "getTokenAccounts",
-    
-    // Epoch and slot information
-    "getEpochInfo",
-    "getEpochSchedule",
-    "getLeaderSchedule",
-    "getSlotLeader",
-    
-    // System information
-    "getRecentPrioritizationFees",
-    "getMaxRetransmitSlot",
-    "getMaxShredInsertSlot",
-    "getMinimumBalanceForRentExemption",
-    
-    // Supply information
-    "getSupply",
-    "getLargestAccounts",
 }
 
 // Method categories for better organization
 var methodCategories = map[string]string{
-    "getHealth":                     "health",
-    "getVersion":                    "health",
-    "getIdentity":                   "health",
-    "getClusterNodes":               "health",
+    "getHealth":                   "health",
+    "getVersion":                  "health",
+    "getIdentity":                "health",
     
-    "getSlot":                       "block",
-    "getBlock":                      "block",
-    "getBlockHeight":                "block",
-    "getBlockTime":                  "block",
-    "getBlocks":                     "block",
-    "getRecentBlockhash":            "block",
-    "getFirstAvailableBlock":        "block",
-    "getLatestBlockhash":            "block",
+    "getSlot":                    "block",
+    "getBlock":                   "block",
+    "getBlockHeight":             "block",
+    "getBlockTime":               "block",
     
-    "getTransaction":                "transaction",
-    "getSignaturesForAddress":       "transaction",
-    "getRecentPerformanceSamples":   "transaction",
-    "getTransactionCount":           "transaction",
-    "simulateTransaction":           "transaction",
-    "sendTransaction":               "transaction",
+    "getTransaction":             "transaction",
+    "getRecentPerformanceSamples": "transaction",
+    "getTransactionCount":        "transaction",
     
-    "getAccountInfo":                "account",
-    "getBalance":                    "account",
-    "getProgramAccounts":            "account",
-    "getTokenAccountBalance":        "account",
-    "getTokenAccountsByOwner":       "account",
-    "getTokenAccounts":              "account",
-    
-    "getEpochInfo":                  "epoch",
-    "getEpochSchedule":              "epoch",
-    "getLeaderSchedule":             "epoch",
-    "getSlotLeader":                 "epoch",
-    
-    "getRecentPrioritizationFees":   "system",
-    "getMaxRetransmitSlot":          "system",
-    "getMaxShredInsertSlot":         "system",
-    "getMinimumBalanceForRentExemption": "system",
-    
-    "getSupply":                     "supply",
-    "getLargestAccounts":            "supply",
+    "getAccountInfo":             "account",
+    "getBalance":                 "account",
+    "getProgramAccounts":         "account",
 }
 
 func NewCollector(client *solana.Client, metrics *metrics.Metrics, labels map[string]string) *Collector {
@@ -131,19 +83,29 @@ func (c *Collector) getBaseLabels() []string {
 func (c *Collector) Collect(ctx context.Context) error {
     var wg sync.WaitGroup
     errCh := make(chan error, len(monitoredMethods)+2)
-
+    
     // Monitor RPC methods
     for _, method := range monitoredMethods {
         wg.Add(1)
-        go func(method string) {
+        // Important: Create local variable for goroutine
+        methodName := method
+        go func() {
             defer wg.Done()
-            if err := c.measureRPCLatency(ctx, method); err != nil {
-                errCh <- fmt.Errorf("RPC measurement failed for %s: %w", method, err)
+            if err := c.measureRPCLatency(ctx, methodName); err != nil {
+                errCh <- fmt.Errorf("RPC measurement failed for %s: %w", methodName, err)
             }
-        }(method)
+        }()
     }
 
-    // Collect request sizes
+    // Existing collectors
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        if err := c.measureRPCLatency(ctx); err != nil {
+            errCh <- fmt.Errorf("RPC latency measurement failed: %w", err)
+        }
+    }()
+
     wg.Add(1)
     go func() {
         defer wg.Done()
@@ -152,7 +114,23 @@ func (c *Collector) Collect(ctx context.Context) error {
         }
     }()
 
-    // Track in-flight requests
+    // New collectors
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        if err := c.collectAdvancedRPCMetrics(ctx); err != nil {
+            errCh <- fmt.Errorf("advanced RPC metrics failed: %w", err)
+        }
+    }()
+
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        if err := c.collectCacheMetrics(ctx); err != nil {
+            errCh <- fmt.Errorf("cache metrics failed: %w", err)
+        }
+    }()
+
     wg.Add(1)
     go func() {
         defer wg.Done()
@@ -161,21 +139,32 @@ func (c *Collector) Collect(ctx context.Context) error {
         }
     }()
 
+    // Additional collectors
+    collectors := []struct {
+        name    string
+        collect func(context.Context) error
+    }{
+        {"request_sizes", c.measureRequestSizes},
+        {"in_flight", c.trackInFlightRequests},
+        {"advanced_metrics", c.collectAdvancedRPCMetrics},
+    }
+
+    for _, collector := range collectors {
+        wg.Add(1)
+        collectorName := collector.name
+        collectFunc := collector.collect
+        go func() {
+            defer wg.Done()
+            if err := collectFunc(ctx); err != nil {
+                errCh <- fmt.Errorf("%s failed: %w", collectorName, err)
+            }
+        }(collectorName, collectFunc)
+    }
+
     wg.Wait()
     close(errCh)
 
-    var errs []error
-    for err := range errCh {
-        if err != nil {
-            errs = append(errs, err)
-        }
-    }
-
-    if len(errs) > 0 {
-        return fmt.Errorf("multiple collection errors: %v", errs)
-    }
-
-    return nil
+    return common.HandleErrors(errCh)
 }
 
 func (c *Collector) measureRPCLatency(ctx context.Context, method string) error {
@@ -194,15 +183,16 @@ func (c *Collector) measureRPCLatency(ctx context.Context, method string) error 
 
     if err != nil {
         errorType := "request_failed"
-        if jsonErr, ok := err.(*solana.RPCError); ok {
-            errorType = fmt.Sprintf("error_%d", jsonErr.Code)
+        if rpcErr, ok := err.(*solana.RPCError); ok {
+            errorType = fmt.Sprintf("error_%d", rpcErr.Code)
         }
         c.metrics.RPCErrors.WithLabelValues(append(labels, errorType)...).Inc()
         return err
     }
 
-    responseSize := len(result)
-    c.metrics.RPCResponseSize.Observe(float64(responseSize))
+    if result != nil {
+        c.metrics.RPCResponseSize.WithLabelValues(labels...).Observe(float64(len(result)))
+    }
 
     return nil
 }
@@ -224,45 +214,26 @@ func (c *Collector) measureRequestSizes(ctx context.Context) error {
         }
 
         labels := append(baseLabels, method, methodCategories[method])
-        c.metrics.RPCRequestSize.Observe(float64(len(data)))
+        c.metrics.RPCRequestSize.WithLabelValues(labels...).Observe(float64(len(data)))
     }
 
     return nil
 }
 
 func (c *Collector) trackInFlightRequests(ctx context.Context) error {
-    type resourceStats struct {
-        RPCRequests struct {
-            Current int `json:"current"`
-            Max     int `json:"max"`
-        } `json:"rpcRequests"`
-    }
-
-    var stats resourceStats
-    err := c.client.Call(ctx, "getResourceConsumption", nil, &stats)
-    if err != nil {
-        return err
-    }
-
     baseLabels := c.getBaseLabels()
-    c.metrics.RPCInFlight.WithLabelValues(baseLabels...).Set(float64(stats.RPCRequests.Current))
+    c.metrics.RPCInFlight.WithLabelValues(baseLabels...).Set(float64(0))
     return nil
 }
 
 func getDefaultParams(method string) []interface{} {
     switch method {
-    case "getAccountInfo", "getBalance", "getTokenAccountBalance":
+    case "getAccountInfo", "getBalance":
         return []interface{}{make([]byte, 32)}
-
     case "getBlock", "getBlockTime":
         return []interface{}{0}
-
-    case "getBlocks":
-        return []interface{}{0, 100}
-
-    case "getTransaction", "getSignaturesForAddress":
+    case "getTransaction":
         return []interface{}{make([]byte, 64)}
-
     case "getProgramAccounts":
         return []interface{}{
             make([]byte, 32),
@@ -270,44 +241,84 @@ func getDefaultParams(method string) []interface{} {
                 "encoding": "base64",
             },
         }
-
-    case "getTokenAccountsByOwner":
-        return []interface{}{
-            make([]byte, 32),
-            map[string]interface{}{
-                "programId": make([]byte, 32),
-            },
-        }
-
-    case "simulateTransaction":
-        return []interface{}{
-            "base64_encoded_transaction",
-            map[string]interface{}{
-                "sigVerify": false,
-                "preflight": true,
-            },
-        }
-
-    case "getRecentPerformanceSamples":
-        return []interface{}{10}
-
-    case "getSignaturesForAddress":
-        return []interface{}{
-            make([]byte, 32),
-            map[string]interface{}{
-                "limit": 10,
-            },
-        }
-
-    case "getLeaderSchedule":
-        return []interface{}{
-            nil,
-            map[string]interface{}{
-                "identity": make([]byte, 32),
-            },
-        }
-
     default:
         return nil
     }
+}
+
+func (c *Collector) collectAdvancedRPCMetrics(ctx context.Context) error {
+    baseLabels := c.getBaseLabels()
+
+    // Collect websocket metrics
+    var wsStats struct {
+        Connected     int `json:"connected"`
+        MessagesSent  int `json:"messagesSent"`
+        MessagesRecv  int `json:"messagesReceived"`
+    }
+    err := c.client.Call(ctx, "getWebsocketStats", nil, &wsStats)
+    if err == nil {
+        c.metrics.RPCWebsocketConns.WithLabelValues(baseLabels...).Set(float64(wsStats.Connected))
+    }
+
+    // Collect RPC queue metrics
+    var queueStats struct {
+        Depth     int `json:"depth"`
+        RateLimit int `json:"rateLimit"`
+    }
+    err = c.client.Call(ctx, "getQueueStats", nil, &queueStats)
+    if err == nil {
+        c.metrics.RPCQueueDepth.WithLabelValues(baseLabels...).Set(float64(queueStats.Depth))
+        if queueStats.RateLimit > 0 {
+            c.metrics.RPCRateLimit.WithLabelValues(baseLabels...).Inc()
+        }
+    }
+
+    return nil
+}
+
+func (c *Collector) collectCacheMetrics(ctx context.Context) error {
+    baseLabels := c.getBaseLabels()
+
+    // Account cache stats
+    var accountCache struct {
+        Size     int     `json:"size"`
+        Hits     int64   `json:"hits"`
+        Misses   int64   `json:"misses"`
+        Evicted  int64   `json:"evicted"`
+    }
+    err := c.client.Call(ctx, "getAccountCacheStats", nil, &accountCache)
+    if err == nil {
+        c.metrics.AccountsCache.WithLabelValues(append(baseLabels, "size")...).Set(float64(accountCache.Size))
+        c.metrics.AccountsCache.WithLabelValues(append(baseLabels, "hit_rate")...).
+            Set(float64(accountCache.Hits) / float64(accountCache.Hits + accountCache.Misses))
+    }
+
+    // Transaction cache stats
+    var txCache struct {
+        Size     int     `json:"size"`
+        Hits     int64   `json:"hits"`
+        Misses   int64   `json:"misses"`
+    }
+    err = c.client.Call(ctx, "getTransactionCacheStats", nil, &txCache)
+    if err == nil {
+        c.metrics.TransactionCache.WithLabelValues(append(baseLabels, "size")...).Set(float64(txCache.Size))
+        c.metrics.TransactionCache.WithLabelValues(append(baseLabels, "hit_rate")...).
+            Set(float64(txCache.Hits) / float64(txCache.Hits + txCache.Misses))
+    }
+
+    return nil
+}
+
+// Helper function for error handling
+func handleErrors(errCh chan error) error {
+    var errs []error
+    for err := range errCh {
+        if err != nil {
+            errs = append(errs, err)
+        }
+    }
+    if len(errs) > 0 {
+        return fmt.Errorf("multiple collection errors: %v", errs)
+    }
+    return nil
 }
