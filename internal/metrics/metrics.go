@@ -6,72 +6,35 @@ import (
 
 type Metrics struct {
     // RPC Performance Metrics
-    RPCLatency          *prometheus.HistogramVec
-    RPCRequests         *prometheus.CounterVec
-    RPCErrors           *prometheus.CounterVec
-    RPCInFlight         *prometheus.GaugeVec
-    RPCRequestSize      *prometheus.HistogramVec
-    RPCResponseSize     *prometheus.HistogramVec
+    RPCLatency          *prometheus.HistogramVec    // Labels: ["node", "method"]
+    RPCRequests         *prometheus.CounterVec      // Labels: ["node", "method"]
+    RPCErrors           *prometheus.CounterVec      // Labels: ["node", "method", "error_type"]
+    RPCInFlight         *prometheus.GaugeVec        // Labels: ["node"]
+    RPCRequestSize      *prometheus.HistogramVec    // Labels: ["node", "method"]
+    RPCResponseSize     *prometheus.HistogramVec    // Labels: ["node", "method"]
+    RPCQueueDepth       *prometheus.GaugeVec        // Labels: ["node"]
+    RPCRateLimit        *prometheus.CounterVec      // Labels: ["node"]
+    RPCWebsocketConns   *prometheus.GaugeVec        // Labels: ["node"]
 
     // Node Health Metrics
-    NodeHealth          *prometheus.GaugeVec
-    NodeVersion         *prometheus.GaugeVec
-    LastRestartTime     *prometheus.GaugeVec
-    UptimeSeconds       *prometheus.CounterVec
+    NodeHealth          *prometheus.GaugeVec        // Labels: ["node", "status"]
+    NodeVersion         *prometheus.GaugeVec        // Labels: ["node", "version"]
 
     // Slot and Block Metrics
-    CurrentSlot         *prometheus.GaugeVec
-    NetworkSlot         *prometheus.GaugeVec
-    SlotDiff           *prometheus.GaugeVec
-    BlockHeight        *prometheus.GaugeVec
-    BlockProcessingTime *prometheus.HistogramVec
+    CurrentSlot         *prometheus.GaugeVec        // Labels: ["node"]
+    NetworkSlot         *prometheus.GaugeVec        // Labels: ["node"]
+    SlotDiff            *prometheus.GaugeVec        // Labels: ["node"]
+    BlockHeight         *prometheus.GaugeVec        // Labels: ["node"]
+    BlockTime           *prometheus.GaugeVec        // Labels: ["node"]
+    BlockProcessingTime *prometheus.HistogramVec    // Labels: ["node"]
     
     // Transaction Metrics
-    TxThroughput       *prometheus.GaugeVec
-    TxSuccessRate      *prometheus.GaugeVec
-    TxErrorRate        *prometheus.GaugeVec
-    TxPerSlot          *prometheus.HistogramVec
-    TxConfirmationTime *prometheus.HistogramVec
-    TxQueueSize        *prometheus.GaugeVec
-    
-    // System Resource Metrics
-    CPUUsage           *prometheus.GaugeVec
-    MemoryUsage        *prometheus.GaugeVec
-    DiskUsage          *prometheus.GaugeVec
-    DiskIOPS           *prometheus.GaugeVec
-    NetworkIO          *prometheus.CounterVec
-    SystemFileDesc    *prometheus.GaugeVec
-    GoroutineCount     *prometheus.GaugeVec
-
-    // Collection Metrics
-    CollectionDuration  *prometheus.HistogramVec
-    CollectionSuccess   *prometheus.CounterVec
-    CollectionErrors    *prometheus.CounterVec
-
-    // Additional RPC Metrics
-    RPCQueueDepth       *prometheus.GaugeVec     // Queue depth for RPC requests
-    RPCRateLimit       *prometheus.CounterVec    // Rate limit hits
-    RPCBatchSize       *prometheus.HistogramVec  // Size of batch requests
-    RPCWebsocketConns  *prometheus.GaugeVec     // Active websocket connections
-
-    // Additional Performance Metrics
-    BlockTime          *prometheus.GaugeVec     // Time between blocks
-    SlotProcessingTime *prometheus.HistogramVec // Time to process each slot
-    TransactionRetries *prometheus.CounterVec   // Number of transaction retries
-    BlockPropagation  *prometheus.HistogramVec // Block propagation time
-    ValidatorCount    *prometheus.GaugeVec     // Number of active validators
-    AccountsCache     *prometheus.GaugeVec     // Accounts cache statistics
-    TransactionCache  *prometheus.GaugeVec     // Transaction cache statistics
-
-    // Additional System Metrics
-    IOWaitTime        *prometheus.GaugeVec     // IO wait time
-    SwapUsage         *prometheus.GaugeVec     // Swap memory usage
-    TCPConnections    *prometheus.GaugeVec     // TCP connection stats
-    FileDescriptors   *prometheus.GaugeVec     // File descriptor usage
-    ProcessStats      *prometheus.GaugeVec     // Process statistics
-    SystemLoad        *prometheus.GaugeVec     // System load averages
-    NetworkErrors     *prometheus.CounterVec   // Network error counts
-    DiskLatency      *prometheus.HistogramVec  // Disk operation latency
+    TxThroughput        *prometheus.GaugeVec        // Labels: ["node"]
+    TxSuccessRate       *prometheus.GaugeVec        // Labels: ["node"]
+    TxErrorRate         *prometheus.GaugeVec        // Labels: ["node"]
+    TxPerSlot           *prometheus.HistogramVec    // Labels: ["node"]
+    TxConfirmationTime  *prometheus.HistogramVec    // Labels: ["node"]
+    TransactionRetries  *prometheus.CounterVec      // Labels: ["node", "type"]
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -106,6 +69,20 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
             },
             []string{"node"},
         ),
+        RPCQueueDepth: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_rpc_queue_depth",
+                Help: "Queue depth for RPC requests",
+            },
+            []string{"node"},
+        ),
+        RPCRateLimit: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "solana_rpc_rate_limit_hits_total",
+                Help: "Number of times RPC rate limit was hit",
+            },
+            []string{"node"},
+        ),
         RPCRequestSize: prometheus.NewHistogramVec(
             prometheus.HistogramOpts{
                 Name: "solana_rpc_request_size_bytes",
@@ -113,6 +90,21 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
                 Buckets: []float64{64, 256, 1024, 4096, 16384, 65536, 262144},
             },
             []string{"node", "method"},
+        ),
+        RPCResponseSize: prometheus.NewHistogramVec(
+            prometheus.HistogramOpts{
+                Name: "solana_rpc_response_size_bytes",
+                Help: "Size of RPC response payloads in bytes",
+                Buckets: []float64{64, 256, 1024, 4096, 16384, 65536, 262144},
+            },
+            []string{"node", "method"},
+        ),
+        RPCWebsocketConns: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_rpc_websocket_connections",
+                Help: "Number of active websocket connections",
+            },
+            []string{"node"},
         ),
 
         // Node Health Metrics
@@ -128,10 +120,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
                 Name: "solana_node_version",
                 Help: "Node version information",
             },
-            []string{"node", "version", "feature_set"},
+            []string{"node", "version"},
         ),
 
-        // Slot Metrics
+        // Slot and Block Metrics
         CurrentSlot: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "solana_current_slot",
@@ -153,6 +145,28 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
             },
             []string{"node"},
         ),
+        BlockHeight: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_block_height",
+                Help: "Current block height",
+            },
+            []string{"node"},
+        ),
+        BlockTime: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_block_time_seconds",
+                Help: "Time between blocks",
+            },
+            []string{"node"},
+        ),
+        BlockProcessingTime: prometheus.NewHistogramVec(
+            prometheus.HistogramOpts{
+                Name: "solana_block_processing_time_seconds",
+                Help: "Time taken to process blocks",
+                Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
+            },
+            []string{"node"},
+        ),
 
         // Transaction Metrics
         TxThroughput: prometheus.NewGaugeVec(
@@ -169,31 +183,35 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
             },
             []string{"node"},
         ),
-
-        // System Metrics
-        CPUUsage: prometheus.NewGaugeVec(
+        TxErrorRate: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
-                Name: "solana_cpu_usage_percent",
-                Help: "CPU usage percentage",
+                Name: "solana_transaction_error_rate",
+                Help: "Transaction error rate percentage",
             },
-            []string{"node", "core"},
+            []string{"node"},
         ),
-        MemoryUsage: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_memory_usage_bytes",
-                Help: "Memory usage in bytes",
+        TxPerSlot: prometheus.NewHistogramVec(
+            prometheus.HistogramOpts{
+                Name: "solana_transactions_per_slot",
+                Help: "Number of transactions per slot",
+                Buckets: []float64{10, 50, 100, 200, 500, 1000, 2000, 5000},
+            },
+            []string{"node"},
+        ),
+        TxConfirmationTime: prometheus.NewHistogramVec(
+            prometheus.HistogramOpts{
+                Name: "solana_transaction_confirmation_time_seconds",
+                Help: "Time taken for transaction confirmation",
+                Buckets: []float64{0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+            },
+            []string{"node"},
+        ),
+        TransactionRetries: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "solana_transaction_retries_total",
+                Help: "Number of transaction retries",
             },
             []string{"node", "type"},
-        ),
-
-        // Collection Metrics
-        CollectionDuration: prometheus.NewHistogramVec(
-            prometheus.HistogramOpts{
-                Name: "solana_collector_duration_seconds",
-                Help: "Time spent collecting metrics",
-                Buckets: []float64{0.1, 0.5, 1, 2.5, 5, 10},
-            },
-            []string{"node", "module"},
         ),
     }
 
@@ -203,16 +221,25 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
         m.RPCRequests,
         m.RPCErrors,
         m.RPCInFlight,
+        m.RPCRequestSize,
+        m.RPCResponseSize,
+        m.RPCQueueDepth,
+        m.RPCRateLimit,
+        m.RPCWebsocketConns,
         m.NodeHealth,
         m.NodeVersion,
         m.CurrentSlot,
         m.NetworkSlot,
         m.SlotDiff,
+        m.BlockHeight,
+        m.BlockTime,
+        m.BlockProcessingTime,
         m.TxThroughput,
         m.TxSuccessRate,
-        m.CPUUsage,
-        m.MemoryUsage,
-        m.CollectionDuration,
+        m.TxErrorRate,
+        m.TxPerSlot,
+        m.TxConfirmationTime,
+        m.TransactionRetries,
     )
 
     return m

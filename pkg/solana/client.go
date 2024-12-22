@@ -6,14 +6,18 @@ import (
     "encoding/json"
     "fmt"
     "net/http"
+    "sync"
     "time"
 )
 
 type Client struct {
-    endpoint    string
-    httpClient  *http.Client
-    labels      map[string]string
-    retryConfig RetryConfig
+    endpoint         string
+    httpClient      *http.Client
+    labels          map[string]string
+    retryConfig     RetryConfig
+    inflightRequests map[int64]struct{}  // Track in-flight requests
+    nextRequestID   int64                // For generating unique request IDs
+    mu              sync.RWMutex         // Protect concurrent access
 }
 
 type RetryConfig struct {
@@ -23,14 +27,14 @@ type RetryConfig struct {
 
 type RPCRequest struct {
     Jsonrpc string        `json:"jsonrpc"`
-    ID      int           `json:"id"`
+    ID      int64         `json:"id"`  // Changed to int64 to match nextRequestID
     Method  string        `json:"method"`
     Params  []interface{} `json:"params,omitempty"`
 }
 
 type RPCResponse struct {
     Jsonrpc string          `json:"jsonrpc"`
-    ID      int             `json:"id"`
+    ID      int64           `json:"id"`  // Changed to int64 to match request
     Result  json.RawMessage `json:"result,omitempty"`
     Error   *RPCError       `json:"error,omitempty"`
 }
@@ -64,6 +68,7 @@ func NewClient(endpoint string, timeout time.Duration, labels map[string]string)
             MaxRetries:   3,
             RetryBackoff: time.Second,
         },
+        inflightRequests: make(map[int64]struct{}),
     }
 }
 
@@ -73,6 +78,13 @@ func (c *Client) GetLabels() map[string]string {
 
 func (c *Client) SetRetryConfig(config RetryConfig) {
     c.retryConfig = config
+}
+
+// GetInflightRequests returns the number of in-flight requests
+func (c *Client) GetInflightRequests() int {
+    c.mu.RLock()
+    defer c.mu.RUnlock()
+    return len(c.inflightRequests)
 }
 
 func (c *Client) Call(ctx context.Context, method string, params []interface{}, result interface{}) error {
@@ -94,9 +106,23 @@ func (c *Client) Call(ctx context.Context, method string, params []interface{}, 
 }
 
 func (c *Client) doCall(ctx context.Context, method string, params []interface{}, result interface{}) error {
+    // Generate unique request ID and track it
+    c.mu.Lock()
+    requestID := c.nextRequestID
+    c.nextRequestID++
+    c.inflightRequests[requestID] = struct{}{}
+    c.mu.Unlock()
+
+    // Ensure we remove the request from tracking when done
+    defer func() {
+        c.mu.Lock()
+        delete(c.inflightRequests, requestID)
+        c.mu.Unlock()
+    }()
+
     request := RPCRequest{
         Jsonrpc: "2.0",
-        ID:      1,
+        ID:      requestID,
         Method:  method,
         Params:  params,
     }
