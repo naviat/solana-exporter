@@ -12,7 +12,6 @@ import (
     "solana-rpc-monitor/internal/modules/health"
     "solana-rpc-monitor/internal/modules/performance"
     "solana-rpc-monitor/internal/modules/rpc"
-    "solana-rpc-monitor/internal/modules/system"
     "solana-rpc-monitor/pkg/solana"
 )
 
@@ -55,17 +54,6 @@ func (c *Collector) initializeModules() {
         rpc.NewCollector(c.client, c.metrics, c.nodeLabels),
         health.NewCollector(c.client, c.metrics, c.nodeLabels),
         performance.NewCollector(c.client, c.metrics, c.nodeLabels),
-        system.NewCollector(c.metrics, struct {
-            EnableCPUMetrics     bool
-            EnableMemoryMetrics  bool
-            EnableDiskMetrics    bool
-            EnableNetworkMetrics bool
-        }{
-            EnableCPUMetrics:     c.config.System.EnableCPUMetrics,
-            EnableMemoryMetrics:  c.config.System.EnableMemoryMetrics,
-            EnableDiskMetrics:    c.config.System.EnableDiskMetrics,
-            EnableNetworkMetrics: c.config.System.EnableNetworkMetrics,
-        }, c.nodeLabels),
     }
 }
 
@@ -81,7 +69,9 @@ func (c *Collector) Run(ctx context.Context) {
             log.Println("Collector received shutdown signal")
             return
         case <-ticker.C:
-            c.Collect(ctx)
+            if err := c.Collect(ctx); err != nil {
+                log.Printf("Error during collection: %v", err)
+            }
         }
     }
 }
@@ -142,14 +132,9 @@ func (c *Collector) Collect(ctx context.Context) error {
 }
 
 func (c *Collector) recordCollectionMetrics(moduleName string, duration time.Duration, err error) {
-    labels := []string{c.nodeLabels["node_address"], moduleName}
-
-    c.metrics.CollectionDuration.WithLabelValues(labels...).Observe(duration.Seconds())
-
-    if err == nil {
-        c.metrics.CollectionSuccess.WithLabelValues(labels...).Inc()
-    } else {
-        c.metrics.CollectionErrors.WithLabelValues(labels...).Inc()
+    // We no longer track collection metrics in the new structure
+    if err != nil {
+        log.Printf("Error collecting %s metrics: %v", moduleName, err)
     }
 }
 
