@@ -38,6 +38,12 @@ func main() {
         // Extract node information from request parameters
         nodeAddress := r.URL.Query().Get("node_address")
         nodeScheme := r.URL.Query().Get("node_scheme")
+
+        if nodeAddress == "" {
+            http.Error(w, "node_address parameter is required", http.StatusBadRequest)
+            return
+        }
+
         if nodeScheme == "" {
             nodeScheme = "http"
         }
@@ -50,9 +56,13 @@ func main() {
             "release":     r.URL.Query().Get("release"),
         }
 
-        // Create RPC client for this node
+        // Create RPC client for this node with both HTTP and WS endpoints
         endpoint := fmt.Sprintf("%s://%s", nodeScheme, nodeAddress)
-        client := solana.NewClient(endpoint, cfg.RPC.Timeout, labels)
+        client := solana.NewClient(endpoint, cfg.RPC.WSPort, cfg.RPC.Timeout, labels)
+        if client == nil {
+            http.Error(w, "Failed to create client", http.StatusInternalServerError)
+            return
+        }
 
         // Create collector for this node
         nodeCollector := collector.NewCollector(client, metricsCollector, cfg, labels)

@@ -11,6 +11,11 @@ type Config struct {
     RPC struct {
         Endpoint string        `yaml:"endpoint"`
         Timeout  time.Duration `yaml:"timeout"`
+        MaxRetries   int          `yaml:"max_retries"`
+        RetryBackoff time.Duration `yaml:"retry_backoff"`
+        WSPort       int          `yaml:"ws_port"`
+        WSEnabled    bool         `yaml:"ws_enabled"`
+        HealthCheckEnabled bool          `yaml:"health_check_enabled"`
     } `yaml:"rpc"`
 
     Server struct {
@@ -25,13 +30,6 @@ type Config struct {
         TimeoutPerModule time.Duration `yaml:"timeout_per_module"`
         ConcurrentModules int          `yaml:"concurrent_modules"`
     } `yaml:"collector"`
-
-    System struct {
-        EnableDiskMetrics    bool `yaml:"enable_disk_metrics"`
-        EnableCPUMetrics     bool `yaml:"enable_cpu_metrics"`
-        EnableMemoryMetrics  bool `yaml:"enable_memory_metrics"`
-        EnableNetworkMetrics bool `yaml:"enable_network_metrics"`
-    } `yaml:"system"`
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -48,6 +46,15 @@ func LoadConfig(path string) (*Config, error) {
     // Set defaults if not specified
     if config.RPC.Timeout == 0 {
         config.RPC.Timeout = 30 * time.Second
+    }
+    if config.RPC.MaxRetries == 0 {
+        config.RPC.MaxRetries = 3
+    }
+    if config.RPC.RetryBackoff == 0 {
+        config.RPC.RetryBackoff = time.Second
+    }
+    if config.RPC.WSPort == 0 {
+        config.RPC.WSPort = 8800 // Default WebSocket port
     }
     if config.Collector.Interval == 0 {
         config.Collector.Interval = 15 * time.Second
