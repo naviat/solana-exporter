@@ -50,10 +50,38 @@ func NewCollector(client *solana.Client, metrics *metrics.Metrics, cfg *config.C
 }
 
 func (c *Collector) initializeModules() {
-    c.modules = []ModuleCollector{
-        rpc.NewCollector(c.client, c.metrics, c.nodeLabels),
-        health.NewCollector(c.client, c.metrics, c.nodeLabels),
+    var modules []ModuleCollector
+
+    // Only add health collector if enabled
+    if c.config.RPC.HealthCheckEnabled {
+        modules = append(modules, health.NewCollector(c.client, c.metrics, c.nodeLabels))
+    }
+
+    // Add other collectors
+    modules = append(modules,
+        rpc.NewCollector(c.client, c.metrics, c.nodeLabels, c.config),
         performance.NewCollector(c.client, c.metrics, c.nodeLabels),
+    )
+
+    c.modules = modules
+}
+
+func (c *Collector) detectNetwork(ctx context.Context) (string, error) {
+    var genesisHash string
+    if err := c.client.Call(ctx, "getGenesisHash", nil, &genesisHash); err != nil {
+        return "", fmt.Errorf("failed to get genesis hash: %w", err)
+    }
+
+    // Known genesis hashes
+    switch genesisHash {
+    case "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d":
+        return "mainnet-beta", nil
+    case "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG":
+        return "devnet", nil
+    case "4uhcVJyU9pJkvQyS88uRDiswHXSCkY3zQawwpjk2NsNY":
+        return "testnet", nil
+    default:
+        return "", fmt.Errorf("unknown network genesis hash: %s", genesisHash)
     }
 }
 
@@ -134,7 +162,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 func (c *Collector) recordCollectionMetrics(moduleName string, duration time.Duration, err error) {
     // We no longer track collection metrics in the new structure
     if err != nil {
-        log.Printf("Error collecting %s metrics: %v", moduleName, err)
+        log.Printf("Error collecting RPC %s metrics: %v", moduleName, err)
     }
 }
 

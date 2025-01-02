@@ -55,7 +55,7 @@ func (c *Collector) Collect(ctx context.Context) error {
     }{
         {"transaction_metrics", c.collectTransactionMetrics},
         {"slot_metrics", c.collectSlotMetrics},
-        {"block_metrics", c.collectBlockMetrics},
+        //{"websocket_performance", c.collectWebSocketPerformance},
     }
 
     for _, collector := range collectors {
@@ -95,10 +95,14 @@ func (c *Collector) collectBlockMetrics(ctx context.Context) error {
 }
 
 func (c *Collector) collectTransactionMetrics(ctx context.Context) error {
+    var errCh = make(chan error, 1)
+
     var samples []PerformanceSample
     err := c.client.Call(ctx, "getRecentPerformanceSamples", []interface{}{5}, &samples)
     if err != nil {
-        return err
+        errCh <- fmt.Errorf("failed to get performance samples: %w", err)
+        close(errCh)
+        return common.HandleErrors(errCh)
     }
 
     baseLabels := c.getBaseLabels()
@@ -117,101 +121,61 @@ func (c *Collector) collectTransactionMetrics(ctx context.Context) error {
         }
     }
 
-    return nil
+    close(errCh)
+    return common.HandleErrors(errCh)
 }
 
 func (c *Collector) collectSlotMetrics(ctx context.Context) error {
+    var errCh = make(chan error, 2) // 2 for both slot operations
     baseLabels := c.getBaseLabels()
 
     // Get current slot
     var currentSlot uint64
-    err := c.client.Call(ctx, "getSlot", nil, &currentSlot)
-    if err == nil && c.metrics.CurrentSlot != nil {
+    if err := c.client.Call(ctx, "getSlot", nil, &currentSlot); err != nil {
+        errCh <- fmt.Errorf("failed to get current slot: %w", err)
+    } else if c.metrics.CurrentSlot != nil {
         c.metrics.CurrentSlot.WithLabelValues(baseLabels...).Set(float64(currentSlot))
     }
 
     // Get finalized slot
-    err = c.client.Call(ctx, "getSlot", []interface{}{map[string]string{"commitment": "finalized"}}, &currentSlot)
-    if err == nil {
-        if c.metrics.NetworkSlot != nil {
-            c.metrics.NetworkSlot.WithLabelValues(baseLabels...).Set(float64(currentSlot))
-        }
+    if err := c.client.Call(ctx, "getSlot", []interface{}{map[string]string{"commitment": "finalized"}}, &currentSlot); err != nil {
+        errCh <- fmt.Errorf("failed to get finalized slot: %w", err)
+    } else if c.metrics.NetworkSlot != nil {
+        c.metrics.NetworkSlot.WithLabelValues(baseLabels...).Set(float64(currentSlot))
     }
 
-    return nil
+    close(errCh)
+    return common.HandleErrors(errCh)
 }
 
-// func (c *Collector) collectConfirmationMetrics(ctx context.Context) error {
-//     if c.metrics.TxConfirmationTime == nil {
-//         return nil
-//     }
-
-//     type ConfirmationStats struct {
-//         Mean   float64 `json:"mean"`
-//         Stddev float64 `json:"stddev"`
-//     }
-
-//     var stats ConfirmationStats
-//     err := c.client.Call(ctx, "getConfirmationTimeStats", nil, &stats)
-//     if err != nil {
-//         return err
-//     }
-
-//     baseLabels := c.getBaseLabels()
-//     c.metrics.TxConfirmationTime.WithLabelValues(baseLabels...).Observe(stats.Mean)
-    
-//     return nil
-// }
-
-// func (c *Collector) collectBlockPerformance(ctx context.Context) error {
+// func (c *Collector) collectWebSocketPerformance(ctx context.Context) error {
+//     var errCh = make(chan error, 1)
 //     baseLabels := c.getBaseLabels()
 
-//     // Collect block time metrics
-//     if c.metrics.BlockTime != nil {
-//         var blockTime struct {
-//             Average float64 `json:"average"`
-//             Max     float64 `json:"max"`
-//             Min     float64 `json:"min"`
+//     // Get WebSocket performance stats
+//     var wsPerf struct {
+//         Result struct {
+//             AverageLatency    float64 `json:"averageLatency"`
+//             MaxLatency        float64 `json:"maxLatency"`
+//             EventsProcessed   uint64  `json:"eventsProcessed"`
+//             ProcessingErrors  uint64  `json:"processingErrors"`
+//         } `json:"result"`
+//     }
+
+//     if err := c.client.Call(ctx, "getWebsocketPerformance", nil, &wsPerf); err != nil {
+//         errCh <- fmt.Errorf("failed to get websocket performance: %w", err)
+//     } else {
+//         // Record WebSocket latencies
+//         c.metrics.WSLatency.WithLabelValues(append(baseLabels, "average")...).Observe(wsPerf.Result.AverageLatency)
+//         c.metrics.WSLatency.WithLabelValues(append(baseLabels, "max")...).Observe(wsPerf.Result.MaxLatency)
+
+//         // Record processing errors if any
+//         if wsPerf.Result.ProcessingErrors > 0 {
+//             c.metrics.WSErrors.WithLabelValues(append(baseLabels, "processing")...).
+//                 Add(float64(wsPerf.Result.ProcessingErrors))
 //         }
-//         if err := c.client.Call(ctx, "getBlockTime", nil, &blockTime); err == nil {
-//             c.metrics.BlockTime.WithLabelValues(baseLabels...).Set(blockTime.Average)
-//         }
 //     }
 
-//     // Get block height and processing time
-//     if c.metrics.BlockProcessingTime != nil {
-//         var blockStats struct {
-//             ProcessingTime float64 `json:"processingTime"`
-//         }
-//         if err := c.client.Call(ctx, "getRecentBlockStats", nil, &blockStats); err == nil {
-//             c.metrics.BlockProcessingTime.WithLabelValues(baseLabels...).Observe(blockStats.ProcessingTime)
-//         }
-//     }
-
-//     return nil
-// }
-
-// func (c *Collector) collectTransactionRetryMetrics(ctx context.Context) error {
-//     if c.metrics.TransactionRetries == nil {
-//         return nil
-//     }
-
-//     baseLabels := c.getBaseLabels()
-    
-//     var retryStats struct {
-//         Total    uint64 `json:"total"`
-//         Success  uint64 `json:"success"`
-//         Failed   uint64 `json:"failed"`
-//     }
-
-//     err := c.client.Call(ctx, "getTransactionRetryStats", nil, &retryStats)
-//     if err != nil {
-//         return err
-//     }
-
-//     c.metrics.TransactionRetries.WithLabelValues(append(baseLabels, "total")...).Add(float64(retryStats.Total))
-//     c.metrics.TransactionRetries.WithLabelValues(append(baseLabels, "success")...).Add(float64(retryStats.Success))
-//     c.metrics.TransactionRetries.WithLabelValues(append(baseLabels, "failed")...).Add(float64(retryStats.Failed))
-
-//     return nil
+//     close(errCh)
+//     return common.HandleErrors(errCh)
 // }

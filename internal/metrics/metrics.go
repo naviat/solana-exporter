@@ -35,6 +35,14 @@ type Metrics struct {
     TxPerSlot           *prometheus.HistogramVec    // Labels: ["node"]
     TxConfirmationTime  *prometheus.HistogramVec    // Labels: ["node"]
     TransactionRetries  *prometheus.CounterVec      // Labels: ["node", "type"]
+
+    // WebSocket Metrics
+    WSConnections       *prometheus.GaugeVec        // Labels: ["node"]
+    WSSubscriptions     *prometheus.GaugeVec        // Labels: ["node", "subscription_type"]
+    WSMessages          *prometheus.CounterVec      // Labels: ["node", "direction"]  // direction: sent/received
+    WSErrors            *prometheus.CounterVec      // Labels: ["node", "error_type"]
+    WSLatency          *prometheus.HistogramVec    // Labels: ["node", "event_type"]
+
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -213,6 +221,44 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
             },
             []string{"node", "type"},
         ),
+
+        // WebSocket Metrics initialization
+        WSConnections: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_ws_connections",
+                Help: "Number of active WebSocket connections",
+            },
+            []string{"node"},
+        ),
+        WSSubscriptions: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_ws_subscriptions",
+                Help: "Number of active WebSocket subscriptions by type",
+            },
+            []string{"node", "subscription_type"},
+        ),
+        WSMessages: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "solana_ws_messages_total",
+                Help: "Total number of WebSocket messages",
+            },
+            []string{"node", "direction"},
+        ),
+        WSErrors: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "solana_ws_errors_total",
+                Help: "Total number of WebSocket errors",
+            },
+            []string{"node", "error_type"},
+        ),
+        WSLatency: prometheus.NewHistogramVec(
+            prometheus.HistogramOpts{
+                Name: "solana_ws_latency_seconds",
+                Help: "WebSocket event processing latency in seconds",
+                Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
+            },
+            []string{"node", "event_type"},
+        ),
     }
 
     // Register all metrics
@@ -240,6 +286,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
         m.TxPerSlot,
         m.TxConfirmationTime,
         m.TransactionRetries,
+        m.WSConnections,
+        m.WSSubscriptions,
+        m.WSMessages,
+        m.WSErrors,
+        m.WSLatency,
     )
 
     return m

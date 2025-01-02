@@ -6,9 +6,12 @@ server:
 
 rpc:
   endpoint: "http://localhost:8799"  # Default endpoint, can be overridden by VMPodScrape
-  timeout: 10s
+  timeout: 30s
   max_retries: 3
   retry_backoff: 1s
+  ws_port: 8800    # WebSocket port
+  ws_enabled: true # Enable WebSocket monitoring
+  health_check_enabled: false  # Disable health checks
 
 collector:
   interval: 15s
