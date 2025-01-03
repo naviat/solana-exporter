@@ -1,75 +1,130 @@
 package config
 
 import (
+    "fmt"
     "os"
     "time"
-
     "gopkg.in/yaml.v3"
 )
 
 type Config struct {
-    RPC struct {
-        Endpoint string        `yaml:"endpoint"`
-        Timeout  time.Duration `yaml:"timeout"`
-    } `yaml:"rpc"`
-
     Server struct {
-        Port int           `yaml:"port"`
-        Host string        `yaml:"host"`
-        Path string        `yaml:"path"`
-        Timeout time.Duration `yaml:"timeout"`
+        Port int    `yaml:"port"`
+        Host string `yaml:"host"`
     } `yaml:"server"`
 
-    Collector struct {
-        Interval         time.Duration `yaml:"interval"`
-        TimeoutPerModule time.Duration `yaml:"timeout_per_module"`
-        ConcurrentModules int          `yaml:"concurrent_modules"`
-    } `yaml:"collector"`
+    RPC struct {
+        // HTTP RPC settings
+        Timeout      time.Duration `yaml:"timeout"`
+        MaxRetries   int          `yaml:"max_retries"`
+        RetryBackoff time.Duration `yaml:"retry_backoff"`
+        
+        // WebSocket settings
+        WSPort       int          `yaml:"ws_port"`
+        WSTimeout    time.Duration `yaml:"ws_timeout"`
+        
+        // Rate limiting settings
+        RequestsPerSecond int `yaml:"requests_per_second"`
+    } `yaml:"rpc"`
 
-    System struct {
-        EnableDiskMetrics    bool `yaml:"enable_disk_metrics"`
-        EnableCPUMetrics     bool `yaml:"enable_cpu_metrics"`
-        EnableMemoryMetrics  bool `yaml:"enable_memory_metrics"`
-        EnableNetworkMetrics bool `yaml:"enable_network_metrics"`
-    } `yaml:"system"`
+    Collector struct {
+        // Basic collection settings
+        Interval          time.Duration `yaml:"interval"`
+        TimeoutPerModule  time.Duration `yaml:"timeout_per_module"`
+        
+        // Batch processing settings
+        BatchSize         int           `yaml:"batch_size"`
+        BatchInterval     time.Duration `yaml:"batch_interval"`
+        
+        // Collection priorities
+        RPCPriority      int           `yaml:"rpc_priority"`
+        CachePriority    int           `yaml:"cache_priority"`
+        WSPriority       int           `yaml:"ws_priority"`
+    } `yaml:"collector"`
 }
 
 func LoadConfig(path string) (*Config, error) {
     data, err := os.ReadFile(path)
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("read config file: %w", err)
     }
 
     var config Config
     if err := yaml.Unmarshal(data, &config); err != nil {
-        return nil, err
+        return nil, fmt.Errorf("parse config: %w", err)
     }
 
-    // Set defaults if not specified
-    if config.RPC.Timeout == 0 {
-        config.RPC.Timeout = 30 * time.Second
+    if err := config.setDefaults(); err != nil {
+        return nil, fmt.Errorf("set defaults: %w", err)
     }
-    if config.Collector.Interval == 0 {
-        config.Collector.Interval = 15 * time.Second
-    }
-    if config.Collector.TimeoutPerModule == 0 {
-        config.Collector.TimeoutPerModule = 5 * time.Second
-    }
-    if config.Collector.ConcurrentModules == 0 {
-        config.Collector.ConcurrentModules = 4
-    }
-    if config.Server.Port == 0 {
-        config.Server.Port = 8080
-    }
-    if config.Server.Host == "" {
-        config.Server.Host = "0.0.0.0"
-    }
-    if config.Server.Path == "" {
-        config.Server.Path = "/solana/"
-    }
-    if config.Server.Timeout == 0 {
-        config.Server.Timeout = 30 * time.Second
+
+    if err := config.validate(); err != nil {
+        return nil, fmt.Errorf("validate config: %w", err)
     }
 
     return &config, nil
+}
+
+func (c *Config) setDefaults() error {
+    // Server defaults
+    if c.Server.Port == 0 {
+        c.Server.Port = 8080
+    }
+    if c.Server.Host == "" {
+        c.Server.Host = "0.0.0.0"
+    }
+
+    // RPC defaults
+    if c.RPC.Timeout == 0 {
+        c.RPC.Timeout = 30 * time.Second
+    }
+    if c.RPC.MaxRetries == 0 {
+        c.RPC.MaxRetries = 3
+    }
+    if c.RPC.RetryBackoff == 0 {
+        c.RPC.RetryBackoff = time.Second
+    }
+    if c.RPC.RequestsPerSecond == 0 {
+        c.RPC.RequestsPerSecond = 50
+    }
+
+    // Collector defaults
+    if c.Collector.Interval == 0 {
+        c.Collector.Interval = 15 * time.Second
+    }
+    if c.Collector.TimeoutPerModule == 0 {
+        c.Collector.TimeoutPerModule = 10 * time.Second
+    }
+    if c.Collector.BatchSize == 0 {
+        c.Collector.BatchSize = 3
+    }
+    if c.Collector.BatchInterval == 0 {
+        c.Collector.BatchInterval = 2 * time.Second
+    }
+
+    // Priority defaults
+    if c.Collector.RPCPriority == 0 {
+        c.Collector.RPCPriority = 100
+    }
+    if c.Collector.CachePriority == 0 {
+        c.Collector.CachePriority = 80
+    }
+    if c.Collector.WSPriority == 0 {
+        c.Collector.WSPriority = 60
+    }
+
+    return nil
+}
+
+func (c *Config) validate() error {
+    if c.Server.Port < 0 || c.Server.Port > 65535 {
+        return fmt.Errorf("invalid server port: %d", c.Server.Port)
+    }
+    if c.Collector.BatchSize < 1 {
+        return fmt.Errorf("batch size must be at least 1")
+    }
+    if c.Collector.BatchInterval < time.Second {
+        return fmt.Errorf("batch interval must be at least 1 second")
+    }
+    return nil
 }
