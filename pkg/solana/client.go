@@ -6,11 +6,9 @@ import (
     "encoding/json"
     "fmt"
     "net/http"
-    "net/url"
-    "strings"
     "sync"
+    "sync/atomic"
     "time"
-
     "github.com/gorilla/websocket"
 )
 
@@ -40,81 +38,81 @@ func (e *RPCError) Error() string {
     return fmt.Sprintf("RPC error %d: %s", e.Code, e.Message)
 }
 
+// WSConnection represents a WebSocket connection and its statistics
+type WSConnection struct {
+    conn          *websocket.Conn
+    subscriptions map[string]int64
+    messageCount  atomic.Int64
+    errorCount   atomic.Int64
+    lastMessage  time.Time
+    mu           sync.RWMutex
+}
+
+// Client represents a Solana RPC and WebSocket client
 type Client struct {
+    // HTTP RPC settings
     endpoint         string
-    wsEndpoint      string
     httpClient      *http.Client
-    wsConn         *websocket.Conn
-    
-    // Request tracking
-    inflightRequests map[int64]struct{}
-    requestIDCounter int64
-    requestMu        sync.RWMutex
-    
-    // WebSocket management
-    wsSubscriptions  map[string]map[string]struct{}
-    wsMessageCounts  map[string]uint64
-    wsMu            sync.RWMutex
-    wsConnected     bool
-    
-    // Configuration
     timeout         time.Duration
     maxRetries      int
-    wsPort          int
+    requestIDCounter atomic.Int64
+    rateLimiter     *time.Ticker
+
+    // WebSocket settings
+    wsEndpoint      string
+    wsConn         *WSConnection
+    wsEnabled      bool
+    maxConnections  int
+    reconnectDelay  time.Duration
+    
+    // Metrics tracking
+    inflightRequests sync.Map
+    lastResponseTime atomic.Int64
 }
 
-// parseHost extracts the host from an endpoint URL
-func parseHost(endpoint string) string {
-    u, err := url.Parse(endpoint)
-    if err != nil {
-        return strings.Split(endpoint, "://")[1]
-    }
-    return strings.Split(u.Host, ":")[0]
-}
-
-// NewClient creates a new Solana RPC client
-func NewClient(endpoint string, wsPort int, timeout time.Duration, maxRetries int) *Client {
+// NewClient creates a new Solana client with both RPC and optional WebSocket support
+func NewClient(endpoint string, wsEndpoint string, timeout time.Duration, maxRetries int, maxRPS int) *Client {
     return &Client{
-        endpoint:         endpoint,
-        wsEndpoint:      fmt.Sprintf("ws://%s:%d", parseHost(endpoint), wsPort),
-        httpClient:      &http.Client{Timeout: timeout},
-        inflightRequests: make(map[int64]struct{}),
-        wsSubscriptions:  make(map[string]map[string]struct{}),
-        wsMessageCounts:  make(map[string]uint64), // Initialize message counts
-        timeout:         timeout,
-        maxRetries:      maxRetries,
-        wsPort:          wsPort,
+        endpoint:        endpoint,
+        wsEndpoint:     wsEndpoint,
+        httpClient:     &http.Client{Timeout: timeout},
+        timeout:        timeout,
+        maxRetries:     maxRetries,
+        wsEnabled:      wsEndpoint != "",
+        maxConnections: 5,
+        reconnectDelay: 5 * time.Second,
+        rateLimiter:    time.NewTicker(time.Second / time.Duration(maxRPS)),
     }
 }
 
 // Call makes an HTTP RPC request with retries and timeout
 func (c *Client) Call(ctx context.Context, method string, params []interface{}, result interface{}) error {
     var lastErr error
-    backoff := time.Second
+    backoff := c.timeout / time.Duration(c.maxRetries)
 
     for retry := 0; retry <= c.maxRetries; retry++ {
         if retry > 0 {
             select {
             case <-ctx.Done():
                 return ctx.Err()
-            case <-time.After(backoff):
-                backoff *= 2 // exponential backoff
+            case <-time.After(backoff * time.Duration(retry)):
             }
         }
 
-        // Track in-flight request
-        requestID := c.trackRequest()
-        defer c.untrackRequest(requestID)
-
-        // Prepare request
-        request := RPCRequest{
-            Jsonrpc: "2.0",
-            ID:      requestID,
-            Method:  method,
-            Params:  params,
+        // Wait for rate limiter
+        select {
+        case <-c.rateLimiter.C:
+        case <-ctx.Done():
+            return ctx.Err()
         }
 
-        response, err := c.doRequest(ctx, request)
+        // Track request
+        requestID := c.requestIDCounter.Add(1)
+        c.inflightRequests.Store(requestID, time.Now())
+        defer c.inflightRequests.Delete(requestID)
+
+        // Make the request
+        response, err := c.doRequest(ctx, method, params, requestID)
         if err != nil {
             lastErr = err
             continue
@@ -123,13 +121,14 @@ func (c *Client) Call(ctx context.Context, method string, params []interface{}, 
         // Handle response
         if response.Error != nil {
             lastErr = response.Error
+            // Don't retry if it's not a retryable error
             if !isRetryableError(response.Error.Code) {
                 return lastErr
             }
             continue
         }
 
-        // Unmarshal result if provided
+        // Unmarshal result
         if result != nil && response.Result != nil {
             if err := json.Unmarshal(response.Result, result); err != nil {
                 lastErr = fmt.Errorf("unmarshal result: %w", err)
@@ -143,13 +142,10 @@ func (c *Client) Call(ctx context.Context, method string, params []interface{}, 
     return fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
-// WebSocket connection management
+// ConnectWebSocket establishes a WebSocket connection
 func (c *Client) ConnectWebSocket(ctx context.Context) error {
-    c.wsMu.Lock()
-    defer c.wsMu.Unlock()
-
-    if c.wsConn != nil {
-        return nil
+    if !c.wsEnabled {
+        return fmt.Errorf("websocket not enabled")
     }
 
     dialer := websocket.Dialer{
@@ -158,56 +154,101 @@ func (c *Client) ConnectWebSocket(ctx context.Context) error {
 
     conn, _, err := dialer.DialContext(ctx, c.wsEndpoint, nil)
     if err != nil {
-        return fmt.Errorf("websocket connection failed: %w", err)
+        return fmt.Errorf("connect websocket: %w", err)
     }
 
-    c.wsConn = conn
+    c.wsConn = &WSConnection{
+        conn:          conn,
+        subscriptions: make(map[string]int64),
+        lastMessage:   time.Now(),
+    }
+
+    // Start message handler
     go c.handleWebSocketMessages()
 
     return nil
 }
 
-// Helper methods for request tracking
-func (c *Client) trackRequest() int64 {
-    c.requestMu.Lock()
-    defer c.requestMu.Unlock()
-    
-    c.requestIDCounter++
-    id := c.requestIDCounter
-    c.inflightRequests[id] = struct{}{}
-    return id
-}
-
-func (c *Client) untrackRequest(id int64) {
-    c.requestMu.Lock()
-    defer c.requestMu.Unlock()
-    delete(c.inflightRequests, id)
-}
-
-// Metric collection helpers
-func (c *Client) GetInflightRequests() int {
-    c.requestMu.RLock()
-    defer c.requestMu.RUnlock()
-    return len(c.inflightRequests)
-}
-
-func (c *Client) GetWSConnectionCount() int {
-    c.wsMu.RLock()
-    defer c.wsMu.RUnlock()
-    if c.wsConn != nil {
-        return 1
+// Subscribe creates a WebSocket subscription
+func (c *Client) Subscribe(ctx context.Context, method string, params []interface{}) error {
+    if c.wsConn == nil {
+        return fmt.Errorf("websocket not connected")
     }
-    return 0
+
+    request := RPCRequest{
+        Jsonrpc: "2.0",
+        ID:      c.requestIDCounter.Add(1),
+        Method:  method,
+        Params:  params,
+    }
+
+    c.wsConn.mu.Lock()
+    defer c.wsConn.mu.Unlock()
+
+    return c.wsConn.conn.WriteJSON(request)
 }
 
-func (c *Client) GetWSSubscriptionCount(subType string) int {
-    c.wsMu.RLock()
-    defer c.wsMu.RUnlock()
-    return len(c.wsSubscriptions[subType])
+// handleWebSocketMessages processes incoming WebSocket messages
+func (c *Client) handleWebSocketMessages() {
+    for {
+        if c.wsConn == nil {
+            return
+        }
+
+        _, message, err := c.wsConn.conn.ReadMessage()
+        if err != nil {
+            c.wsConn.errorCount.Add(1)
+            // Attempt reconnection
+            if websocket.IsUnexpectedCloseError(err) {
+                go c.reconnectWebSocket()
+            }
+            return
+        }
+
+        c.wsConn.messageCount.Add(1)
+        c.wsConn.mu.Lock()
+        c.wsConn.lastMessage = time.Now()
+        c.wsConn.mu.Unlock()
+
+        // Process message (you can add message handling logic here)
+        var response RPCResponse
+        if err := json.Unmarshal(message, &response); err != nil {
+            c.wsConn.errorCount.Add(1)
+            continue
+        }
+    }
+}
+
+// GetWSStats returns WebSocket connection statistics
+func (c *Client) GetWSStats() map[string]interface{} {
+    if c.wsConn == nil {
+        return map[string]interface{}{
+            "connected": false,
+        }
+    }
+
+    c.wsConn.mu.RLock()
+    defer c.wsConn.mu.RUnlock()
+
+    return map[string]interface{}{
+        "connected":         true,
+        "message_count":     c.wsConn.messageCount.Load(),
+        "error_count":       c.wsConn.errorCount.Load(),
+        "subscription_count": len(c.wsConn.subscriptions),
+        "last_message":      c.wsConn.lastMessage,
+    }
 }
 
 // Private helper methods
-func (c *Client) doRequest(ctx context.Context, request RPCRequest) (*RPCResponse, error) {
+
+func (c *Client) doRequest(ctx context.Context, method string, params []interface{}, id int64) (*RPCResponse, error) {
+    request := RPCRequest{
+        Jsonrpc: "2.0",
+        ID:      id,
+        Method:  method,
+        Params:  params,
+    }
+
     jsonData, err := json.Marshal(request)
     if err != nil {
         return nil, fmt.Errorf("marshal request: %w", err)
@@ -225,6 +266,9 @@ func (c *Client) doRequest(ctx context.Context, request RPCRequest) (*RPCRespons
     }
     defer resp.Body.Close()
 
+    // Update last response time
+    c.lastResponseTime.Store(time.Now().UnixNano())
+
     if resp.StatusCode != http.StatusOK {
         return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
     }
@@ -237,70 +281,73 @@ func (c *Client) doRequest(ctx context.Context, request RPCRequest) (*RPCRespons
     return &rpcResp, nil
 }
 
+func (c *Client) reconnectWebSocket() {
+    time.Sleep(c.reconnectDelay)
+    
+    ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+    defer cancel()
+
+    if err := c.ConnectWebSocket(ctx); err != nil {
+        // Could implement exponential backoff here
+        return
+    }
+
+    // Resubscribe to previous subscriptions
+    c.wsConn.mu.RLock()
+    subscriptions := make(map[string]int64, len(c.wsConn.subscriptions))
+    for method, id := range c.wsConn.subscriptions {
+        subscriptions[method] = id
+    }
+    c.wsConn.mu.RUnlock()
+
+    for method := range subscriptions {
+        if err := c.Subscribe(ctx, method, nil); err != nil {
+            c.wsConn.errorCount.Add(1)
+        }
+    }
+}
+
 func isRetryableError(code int) bool {
-    retryableCodes := map[int]bool{
-        -32007: true, // Node is behind
-        -32008: true, // Node is busy
-        -32009: true, // Transaction simulation failed
+    return code == -32007 || // Node is behind
+           code == -32008 || // Node is busy
+           code == -32009    // Transaction simulation failed
+}
+
+// GetInflightRequests returns the number of in-flight requests
+func (c *Client) GetInflightRequests() int {
+    count := 0
+    c.inflightRequests.Range(func(key, value interface{}) bool {
+        count++
+        return true
+    })
+    return count
+}
+
+// GetWSConnectionCount returns the number of active WebSocket connections
+func (c *Client) GetWSConnectionCount() int {
+    if c.wsConn != nil && c.wsConn.conn != nil {
+        return 1
     }
-    return retryableCodes[code]
+    return 0
 }
 
-func (c *Client) GetWSMessageCount(direction string) uint64 {
-    c.wsMu.RLock()
-    defer c.wsMu.RUnlock()
-    return c.wsMessageCounts[direction]
-}
-
-func (c *Client) incrementWSMessageCount(direction string) {
-    c.wsMu.Lock()
-    defer c.wsMu.Unlock()
-    c.wsMessageCounts[direction]++
-}
-
-// handleWebSocketMessages processes incoming WebSocket messages
-func (c *Client) handleWebSocketMessages() {
-    for {
-        if !c.wsConnected {
-            return
-        }
-
-        _, message, err := c.wsConn.ReadMessage()
-        if err != nil {
-            c.wsMu.Lock()
-            c.wsConnected = false
-            c.wsMu.Unlock()
-            return
-        }
-
-        // Increment inbound message count
-        c.incrementWSMessageCount("inbound")
-
-        // Process the message
-        var msg struct {
-            Method  string          `json:"method"`
-            Params  json.RawMessage `json:"params"`
-            ID      interface{}     `json:"id,omitempty"`
-            Result  json.RawMessage `json:"result,omitempty"`
-            Error   *RPCError       `json:"error,omitempty"`
-        }
-
-        if err := json.Unmarshal(message, &msg); err != nil {
-            continue
-        }
-
-        // Handle subscription responses and increment outbound count for responses
-        if msg.Result != nil && msg.ID != nil {
-            c.incrementWSMessageCount("outbound")
-            var subID uint64
-            if err := json.Unmarshal(msg.Result, &subID); err == nil {
-                c.wsMu.Lock()
-                if c.wsSubscriptions[msg.Method] == nil {
-                    c.wsSubscriptions[msg.Method] = make(map[string]struct{})
-                }
-                c.wsSubscriptions[msg.Method][fmt.Sprintf("%d", subID)] = struct{}{}
-                c.wsMu.Unlock()
-            }
-        }
+// GetWSSubscriptionCount returns the number of active subscriptions
+func (c *Client) GetWSSubscriptionCount() int {
+    if c.wsConn == nil {
+        return 0
     }
+    c.wsConn.mu.RLock()
+    defer c.wsConn.mu.RUnlock()
+    return len(c.wsConn.subscriptions)
+}
+
+// Close closes the client and all connections
+func (c *Client) Close() error {
+    c.rateLimiter.Stop()
+    
+    if c.wsConn != nil && c.wsConn.conn != nil {
+        return c.wsConn.conn.Close()
+    }
+    
+    return nil
 }

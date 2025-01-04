@@ -1,0 +1,25 @@
+rpc:
+  endpoint: "http://localhost:8799"
+  reference_endpoint: "https://api.mainnet-beta.solana.com"
+  timeout: 30s
+  max_retries: 3
+  retry_backoff: 1s
+  version_cache_duration: 5m
+  health_cache_duration: 1m
+  max_requests_per_second: 50
+
+websocket:
+  enabled: true
+  endpoint: "ws://localhost:8800"
+  max_connections: 5
+  reconnect_delay: 5s
+  subscription_batch_size: 3
+  subscription_timeout: 10s
+
+metrics:
+  slot_metrics_interval: 2s
+  health_metrics_interval: 15s
+  ws_metrics_interval: 5s
+  default_labels:
+    chain: "mainnet"
+    exporter_version: "1.0.0"

@@ -4,133 +4,166 @@ import (
     "github.com/prometheus/client_golang/prometheus"
 )
 
-// Metrics holds all Prometheus metrics for the Solana RPC exporter
 type Metrics struct {
+    // Slot/Block Metrics
+    CurrentSlot    *prometheus.GaugeVec   // Current processed slot
+    NetworkSlot    *prometheus.GaugeVec   // Network's highest slot (from reference node)
+    SlotBehind     *prometheus.GaugeVec   // How many slots behind reference node
+    BlockTime      *prometheus.GaugeVec   // Time since last block
+    
+    // Node Status Metrics
+    NodeHealth     *prometheus.GaugeVec   // Health status (1=healthy, 0=unhealthy)
+    NodeVersion    *prometheus.GaugeVec   // Node version info
+    
     // RPC Performance Metrics
-    RPCLatency *prometheus.HistogramVec    // Method execution time
-    RPCRequests *prometheus.CounterVec     // Total request count
-    RPCErrors *prometheus.CounterVec       // Error count by type
-    RPCInFlight *prometheus.GaugeVec       // Current in-flight requests
-    RPCQueueDepth *prometheus.GaugeVec     // Request queue depth
+    RPCLatency     *prometheus.HistogramVec  // RPC response times
+    RPCErrors      *prometheus.CounterVec    // RPC error counts by type
+    RPCRequests    *prometheus.CounterVec    // Total RPC requests
+    RPCInflightRequests    *prometheus.GaugeVec // Metric for inflight requests
     
-    // Method-Specific Performance
-    AccountLookupLatency *prometheus.HistogramVec  // Account queries timing
-    ProgramLookupLatency *prometheus.HistogramVec  // Program account queries timing
-    BlockFetchLatency *prometheus.HistogramVec     // Block retrieval timing
-    TransactionLatency *prometheus.HistogramVec    // Transaction lookup timing
-    
-    // Rate Limiting Metrics
-    RPCRateLimits *prometheus.GaugeVec          // Rate limit ceiling
-    RPCRateCurrentUsage *prometheus.GaugeVec    // Current rate usage
-    RPCRateRemaining *prometheus.GaugeVec       // Remaining rate limit
-    
-    // WebSocket Connection Metrics
-    WSConnections *prometheus.GaugeVec      // Active connections
-    WSSubscriptions *prometheus.GaugeVec    // Active subscriptions by type
-    WSMessages *prometheus.CounterVec       // Message count by direction
-    WSErrors *prometheus.CounterVec         // WebSocket errors
-    WSLatency *prometheus.HistogramVec      // Message processing time
-    
-    // Cache Performance Metrics
-    CacheHitRate *prometheus.GaugeVec       // Cache hit percentage
-    CacheMissRate *prometheus.GaugeVec      // Cache miss percentage
-    CacheSize *prometheus.GaugeVec          // Current cache size
-    CacheEvictions *prometheus.CounterVec   // Cache eviction count
+    // WebSocket Metrics
+    WSConnections          *prometheus.GaugeVec    // Active WS connections
+    WSSubscriptions        *prometheus.GaugeVec    // Active subscriptions by type
+    WSMessageRate          *prometheus.CounterVec  // Message rate by type
+    WSErrors              *prometheus.CounterVec   // WebSocket errors by type
+    WSLatency             *prometheus.HistogramVec // WebSocket message latency
 }
 
-// NewMetrics creates and registers all Prometheus metrics
 func NewMetrics(reg prometheus.Registerer) *Metrics {
     m := &Metrics{
-        // Initialize RPC metrics with appropriate buckets
+        // Slot/Block Metrics
+        CurrentSlot: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_current_slot",
+                Help: "Current processed slot number",
+            },
+            []string{"endpoint", "commitment"},
+        ),
+        NetworkSlot: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_network_slot",
+                Help: "Network's highest known slot",
+            },
+            []string{"endpoint"},
+        ),
+        SlotBehind: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_slot_behind",
+                Help: "Number of slots behind the reference node",
+            },
+            []string{"endpoint"},
+        ),
+        BlockTime: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_block_time_seconds",
+                Help: "Time since last block in seconds",
+            },
+            []string{"endpoint"},
+        ),
+
+        // Node Status Metrics
+        NodeHealth: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_node_health",
+                Help: "Node health status (1 = healthy, 0 = unhealthy)",
+            },
+            []string{"endpoint"},
+        ),
+        NodeVersion: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_node_version",
+                Help: "Node version information",
+            },
+            []string{"endpoint", "version"},
+        ),
+
+        // RPC Performance Metrics
         RPCLatency: prometheus.NewHistogramVec(
             prometheus.HistogramOpts{
                 Name: "solana_rpc_latency_seconds",
                 Help: "RPC method latency in seconds",
-                Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+                // Adjusted buckets to better match Solana RPC timing patterns
+                Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0},
             },
-            []string{"node", "method"},
-        ),
-        RPCRequests: prometheus.NewCounterVec(
-            prometheus.CounterOpts{
-                Name: "solana_rpc_requests_total",
-                Help: "Total number of RPC requests by method",
-            },
-            []string{"node", "method"},
+            []string{"endpoint", "method"},
         ),
         RPCErrors: prometheus.NewCounterVec(
             prometheus.CounterOpts{
                 Name: "solana_rpc_errors_total",
-                Help: "RPC errors by type and method",
+                Help: "Total RPC errors by type and method",
             },
-            []string{"node", "method", "error_type"},
+            []string{"endpoint", "method", "error_type"},
         ),
-        RPCInFlight: prometheus.NewGaugeVec(
+        RPCRequests: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "solana_rpc_requests_total",
+                Help: "Total RPC requests by method",
+            },
+            []string{"endpoint", "method"},
+        ),
+        RPCInflightRequests: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
-                Name: "solana_rpc_in_flight_requests",
-                Help: "Current number of in-flight RPC requests",
+                Name: "solana_rpc_inflight_requests",
+                Help: "Number of in-flight RPC requests",
             },
-            []string{"node"},
+            []string{"endpoint"},
         ),
-        RPCRateLimits: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_rpc_rate_limit",
-                Help: "RPC rate limit by method",
-            },
-            []string{"node", "method"},
-        ),
-        
-        // WebSocket metrics
+
+        // WebSocket Metrics
         WSConnections: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "solana_ws_connections",
                 Help: "Number of active WebSocket connections",
             },
-            []string{"node"},
+            []string{"endpoint"},
         ),
         WSSubscriptions: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "solana_ws_subscriptions",
-                Help: "Number of active WebSocket subscriptions by type",
+                Help: "Number of active WebSocket subscriptions",
             },
-            []string{"node", "subscription_type"},
+            []string{"endpoint", "subscription_type"},
         ),
-        WSMessages: prometheus.NewCounterVec(
+        WSMessageRate: prometheus.NewCounterVec(
             prometheus.CounterOpts{
                 Name: "solana_ws_messages_total",
-                Help: "Total WebSocket messages by direction",
+                Help: "Total WebSocket messages by type",
             },
-            []string{"node", "direction"},
+            []string{"endpoint", "direction"},
         ),
-        
-        // Cache metrics
-        CacheHitRate: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_cache_hit_rate",
-                Help: "Cache hit rate percentage by type",
+        WSErrors: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "solana_ws_errors_total",
+                Help: "Total WebSocket errors by type",
             },
-            []string{"node", "cache_type"},
+            []string{"endpoint", "error_type"},
         ),
-        CacheMissRate: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_cache_miss_rate",
-                Help: "Cache miss rate percentage by type",
+        WSLatency: prometheus.NewHistogramVec(
+            prometheus.HistogramOpts{
+                Name: "solana_ws_latency_seconds",
+                Help: "WebSocket message latency in seconds",
+                Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25},
             },
-            []string{"node", "cache_type"},
+            []string{"endpoint", "message_type"},
         ),
     }
 
-    // Register all metrics with Prometheus
+    // Register all metrics
     reg.MustRegister(
+        m.CurrentSlot,
+        m.NetworkSlot,
+        m.SlotBehind,
+        m.BlockTime,
+        m.NodeHealth,
+        m.NodeVersion,
         m.RPCLatency,
-        m.RPCRequests,
         m.RPCErrors,
-        m.RPCInFlight,
-        m.RPCRateLimits,
+        m.RPCRequests,
         m.WSConnections,
         m.WSSubscriptions,
-        m.WSMessages,
-        m.CacheHitRate,
-        m.CacheMissRate,
+        m.WSMessageRate,
+        m.WSErrors,
+        m.WSLatency,
     )
 
     return m

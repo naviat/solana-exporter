@@ -1,32 +1,15 @@
-FROM golang:1.23-alpine AS builder
+FROM golang:1.21-alpine AS builder
 
 WORKDIR /app
-
-# Install build dependencies
-RUN apk add --no-cache git
-
-# Copy go mod files
-COPY go.mod go.sum ./
-RUN go mod download
-
-# Copy source code
 COPY . .
+RUN go mod download
+RUN CGO_ENABLED=0 GOOS=linux go build -o /solana-exporter ./cmd/exporter
 
-# Build
-RUN CGO_ENABLED=0 GOOS=linux go build -o solana-monitor ./cmd/monitor
+FROM alpine:3.19
 
-FROM alpine:3.18
+COPY --from=builder /solana-exporter /usr/local/bin/
+COPY config.yaml /etc/solana-exporter/
 
-WORKDIR /app
+EXPOSE 9104
 
-# Copy binary from builder
-COPY --from=builder /app/solana-monitor .
-COPY config/config.yaml ./config/
-
-# Run as non-root user
-RUN adduser -D -u 1000 monitor
-USER monitor
-
-EXPOSE 9090
-
-ENTRYPOINT ["./solana-monitor"]
+ENTRYPOINT ["/usr/local/bin/solana-exporter", "--config=/etc/solana-exporter/config.yaml"]
