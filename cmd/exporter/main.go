@@ -38,11 +38,14 @@ func main() {
 
     // Initialize metrics
     m := metrics.NewMetrics(reg)
+    
+	// Initialize Solana clients
+    log.Printf("Initializing RPC clients - Local: %s, Reference: %s", 
+        cfg.RPC.Endpoint, cfg.RPC.ReferenceEndpoint)
 
     // Initialize Solana clients
     localClient := solana.NewClient(
         cfg.RPC.Endpoint,
-        cfg.WebSocket.Endpoint,
         cfg.RPC.Timeout,
         cfg.RPC.MaxRetries,
         cfg.RPC.MaxRequestsPerSecond,
@@ -51,37 +54,26 @@ func main() {
 
     referenceClient := solana.NewClient(
         cfg.RPC.ReferenceEndpoint,
-        "",  // No WebSocket for reference client
         cfg.RPC.Timeout,
         cfg.RPC.MaxRetries,
         cfg.RPC.MaxRequestsPerSecond,
     )
     defer referenceClient.Close()
 
-    // Initialize WebSocket connection if enabled
-    if cfg.WebSocket.Enabled {
-        ctx, cancel := context.WithTimeout(context.Background(), cfg.RPC.Timeout)
-        defer cancel()
-        
-        if err := localClient.ConnectWebSocket(ctx); err != nil {
-            log.Printf("Warning: Failed to establish WebSocket connection: %v", err)
-        }
-    }
-
+    // Initialize collectors
+    log.Printf("Initializing collectors...")
     // Initialize collectors
     collectors := []collector.Collector{
         collector.NewRPCCollector(localClient, referenceClient, m, cfg.Metrics.DefaultLabels),
     }
 
-    if cfg.WebSocket.Enabled {
-        wsCollector := collector.NewWSCollector(localClient, m, cfg.Metrics.DefaultLabels)
-        collectors = append(collectors, wsCollector)
-    }
-
     // Create context that listens for the interrupt signal
     ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
     defer stop()
-
+    
+	// Start collectors
+    log.Printf("Starting collectors with intervals - Slot: %v, Health: %v", 
+        cfg.Metrics.SlotMetricsInterval, cfg.Metrics.HealthMetricsInterval)
     // Start collectors
     for _, c := range collectors {
         go runCollector(ctx, c, cfg)
@@ -142,18 +134,23 @@ func runCollector(ctx context.Context, c collector.Collector, cfg *config.Config
     switch c.Name() {
     case "rpc":
         interval = cfg.Metrics.SlotMetricsInterval
-    case "websocket":
-        interval = cfg.Metrics.WSMetricsInterval
     default:
         interval = cfg.Metrics.HealthMetricsInterval
     }
 
+    log.Printf("Starting collector %s with interval %v", c.Name(), interval)
     ticker := time.NewTicker(interval)
     defer ticker.Stop()
+
+    // Run initial collection
+    if err := c.Collect(ctx); err != nil {
+        log.Printf("Error in initial collection for %s: %v", c.Name(), err)
+    }
 
     for {
         select {
         case <-ctx.Done():
+            log.Printf("Stopping collector %s", c.Name())
             return
         case <-ticker.C:
             if err := c.Collect(ctx); err != nil {
