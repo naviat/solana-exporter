@@ -60,11 +60,14 @@ func main() {
     )
     defer referenceClient.Close()
 
-    // Initialize collectors
+    // Initialize collectors with proper labels
     log.Printf("Initializing collectors...")
+    baseLabels := map[string]string{
+        "endpoint": cfg.RPC.Endpoint,  // Add RPC endpoint as a label
+    }
     // Initialize collectors
     collectors := []collector.Collector{
-        collector.NewRPCCollector(localClient, referenceClient, m, cfg.Metrics.DefaultLabels),
+        collector.NewRPCCollector(localClient, referenceClient, m, baseLabels),
     }
 
     // Create context that listens for the interrupt signal

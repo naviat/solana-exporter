@@ -25,5 +25,4 @@ type StoppableCollector interface {
 type CollectorConfig struct {
     Interval    time.Duration
     Labels      map[string]string
-    MetricsPath string
 }

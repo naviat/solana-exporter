@@ -19,9 +19,3 @@ metrics:
   slot_metrics_interval: 2s    # How often to check slots
   health_metrics_interval: 15s  # How often to check health
   block_metrics_interval: 5s    # How often to check block height/time
-  
-  # Default labels for metrics
-  default_labels:
-    chain: "mainnet"
-    cluster: "mainnet-beta"
-    exporter_version: "1.0.0"

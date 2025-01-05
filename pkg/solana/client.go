@@ -6,7 +6,6 @@ import (
     "encoding/json"
     "fmt"
     "net/http"
-    "sync"
     "sync/atomic"
     "time"
 )
@@ -45,10 +44,6 @@ type Client struct {
     maxRetries      int
     requestIDCounter atomic.Int64
     rateLimiter     *time.Ticker
-    
-    // Metrics tracking
-    inflightRequests sync.Map
-    lastResponseTime atomic.Int64
 }
 
 // NewClient creates a new Solana RPC client
@@ -83,13 +78,8 @@ func (c *Client) Call(ctx context.Context, method string, params []interface{}, 
             return ctx.Err()
         }
 
-        // Track request
-        requestID := c.requestIDCounter.Add(1)
-        c.inflightRequests.Store(requestID, time.Now())
-        defer c.inflightRequests.Delete(requestID)
-
         // Make the request
-        response, err := c.doRequest(ctx, method, params, requestID)
+        response, err := c.doRequest(ctx, method, params)
         if err != nil {
             lastErr = err
             continue
@@ -119,11 +109,10 @@ func (c *Client) Call(ctx context.Context, method string, params []interface{}, 
     return fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
-// Private helper methods
-func (c *Client) doRequest(ctx context.Context, method string, params []interface{}, id int64) (*RPCResponse, error) {
+func (c *Client) doRequest(ctx context.Context, method string, params []interface{}) (*RPCResponse, error) {
     request := RPCRequest{
         Jsonrpc: "2.0",
-        ID:      id,
+        ID:      c.requestIDCounter.Add(1),
         Method:  method,
         Params:  params,
     }
@@ -145,9 +134,6 @@ func (c *Client) doRequest(ctx context.Context, method string, params []interfac
     }
     defer resp.Body.Close()
 
-    // Update last response time
-    c.lastResponseTime.Store(time.Now().UnixNano())
-
     if resp.StatusCode != http.StatusOK {
         return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
     }
@@ -166,14 +152,8 @@ func isRetryableError(code int) bool {
            code == -32009    // Transaction simulation failed
 }
 
-// GetInflightRequests returns the number of in-flight requests
-func (c *Client) GetInflightRequests() int {
-    count := 0
-    c.inflightRequests.Range(func(key, value interface{}) bool {
-        count++
-        return true
-    })
-    return count
+func (c *Client) GetEndpoint() string {
+    return c.endpoint
 }
 
 // Close cleans up the client resources

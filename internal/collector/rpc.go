@@ -4,18 +4,13 @@ import (
     "context"
     "fmt"
     "log"
+    "runtime"
     "sync"
+    "syscall"
     "time"
     "solana-exporter/internal/metrics"
     "solana-exporter/pkg/solana"
 )
-
-type PerformanceSample struct {
-    Slot             uint64  `json:"slot"`
-    NumTransactions  uint64  `json:"numTransactions"`
-    NumSlots         uint64  `json:"numSlots"`
-    SamplePeriodSecs float64 `json:"samplePeriodSecs"`
-}
 
 type RPCCollector struct {
     localClient     *solana.Client
@@ -35,7 +30,10 @@ type metricCache struct {
 }
 
 func NewRPCCollector(localClient, referenceClient *solana.Client, metrics *metrics.Metrics, labels map[string]string) *RPCCollector {
-    log.Printf("Initializing RPC collector with labels: %v", labels)
+    // Add default endpoint label if not present
+    if _, ok := labels["endpoint"]; !ok {
+        labels["endpoint"] = localClient.GetEndpoint()
+    }
     return &RPCCollector{
         localClient:     localClient,
         referenceClient: referenceClient,
@@ -52,9 +50,8 @@ func (c *RPCCollector) Name() string {
 }
 
 func (c *RPCCollector) Collect(ctx context.Context) error {
-    log.Printf("Starting metrics collection cycle...")
     var wg sync.WaitGroup
-    errCh := make(chan error, 3)
+    errCh := make(chan error, 4)
 
     collectors := []struct {
         name string
@@ -62,27 +59,24 @@ func (c *RPCCollector) Collect(ctx context.Context) error {
     }{
         {"slot", c.collectSlotMetrics},
         {"block", c.collectBlockMetrics},
-        {"performance", c.collectPerformanceMetrics},
+        {"epoch", c.collectEpochInfo},
+        {"system", c.collectSystemMetrics},
     }
 
     for _, collector := range collectors {
         wg.Add(1)
         go func(name string, fn func(context.Context) error) {
             defer wg.Done()
-            log.Printf("Collecting %s metrics...", name)
             if err := fn(ctx); err != nil {
                 log.Printf("Error collecting %s metrics: %v", name, err)
                 errCh <- fmt.Errorf("%s: %w", name, err)
-            } else {
-                log.Printf("Successfully collected %s metrics", name)
             }
         }(collector.name, collector.fn)
     }
 
-    // Collect cached metrics (version and health)
-    if err := c.collectCachedMetrics(ctx); err != nil {
-        log.Printf("Error collecting cached metrics: %v", err)
-        errCh <- fmt.Errorf("cached metrics: %w", err)
+    // Collect node status metrics
+    if err := c.collectNodeStatus(ctx); err != nil {
+        errCh <- fmt.Errorf("node status: %w", err)
     }
 
     wg.Wait()
@@ -96,10 +90,53 @@ func (c *RPCCollector) Collect(ctx context.Context) error {
     }
 
     if len(errs) > 0 {
-        return fmt.Errorf("multiple collection errors: %v", errs)
+        return fmt.Errorf("collection errors: %v", errs)
     }
 
-    log.Printf("Completed metrics collection cycle")
+    return nil
+}
+
+func (c *RPCCollector) collectEpochInfo(ctx context.Context) error {
+    type EpochInfo struct {
+        AbsoluteSlot  uint64 `json:"absoluteSlot"`
+        BlockHeight   uint64 `json:"blockHeight"`
+        Epoch         uint64 `json:"epoch"`
+        SlotIndex     uint64 `json:"slotIndex"`
+        SlotsInEpoch  uint64 `json:"slotsInEpoch"`
+    }
+
+    var epochInfo EpochInfo
+    err := c.localClient.Call(ctx, "getEpochInfo", []interface{}{
+        map[string]string{"commitment": "finalized"},
+    }, &epochInfo)
+
+    if err != nil {
+        return fmt.Errorf("get epoch info: %w", err)
+    }
+
+    c.metrics.EpochInfo.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(epochInfo.Epoch))
+    
+    c.metrics.SlotOffset.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(epochInfo.SlotIndex))
+
+    slotsRemaining := epochInfo.SlotsInEpoch - epochInfo.SlotIndex
+    c.metrics.SlotsRemaining.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(slotsRemaining))
+
+    progress := (float64(epochInfo.SlotIndex) / float64(epochInfo.SlotsInEpoch)) * 100
+    c.metrics.EpochProgress.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(progress)
+
+    // Record epoch boundaries
+    epochStartSlot := epochInfo.AbsoluteSlot - epochInfo.SlotIndex
+    c.metrics.ConfirmedEpochFirstSlot.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(epochStartSlot))
+    c.metrics.ConfirmedEpochLastSlot.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(epochStartSlot + epochInfo.SlotsInEpoch))
+    c.metrics.ConfirmedEpochNumber.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(epochInfo.Epoch))
+
     return nil
 }
 
@@ -115,34 +152,20 @@ func (c *RPCCollector) collectSlotMetrics(ctx context.Context) error {
     wg.Add(1)
     go func() {
         defer wg.Done()
-        start := time.Now()
         err := c.localClient.Call(ctx, "getSlot", []interface{}{
             map[string]string{"commitment": "finalized"},
         }, &localSlot)
-        duration := time.Since(start)
 
         if err != nil {
             errCh <- err
-            c.metrics.RPCErrors.WithLabelValues(
-                c.nodeLabels["endpoint"],
-                "getSlot",
-                fmt.Sprintf("%d", err.(*solana.RPCError).Code),
-            ).Inc()
             return
         }
 
-        // Set current slot metric
         c.metrics.CurrentSlot.WithLabelValues(
             c.nodeLabels["endpoint"],
             "finalized",
         ).Set(float64(localSlot))
-
         log.Printf("Local slot: %d", localSlot)
-
-        c.metrics.RPCLatency.WithLabelValues(
-            c.nodeLabels["endpoint"],
-            "getSlot",
-        ).Observe(duration.Seconds())
     }()
 
     // Get reference node slot
@@ -158,20 +181,15 @@ func (c *RPCCollector) collectSlotMetrics(ctx context.Context) error {
             return
         }
 
-        log.Printf("Reference slot: %d", refSlot)
+        c.metrics.NetworkSlot.WithLabelValues(c.nodeLabels["endpoint"]).
+            Set(float64(refSlot))
 
-        c.metrics.NetworkSlot.WithLabelValues(
-            c.nodeLabels["endpoint"],
-        ).Set(float64(refSlot))
-
-        // Calculate and set slot difference if we have both values
         if localSlot > 0 && refSlot > 0 {
             slotDiff := refSlot - localSlot
             if slotDiff >= 0 {
-                log.Printf("Slot difference: %d", slotDiff)
-                c.metrics.SlotBehind.WithLabelValues(
-                    c.nodeLabels["endpoint"],
-                ).Set(float64(slotDiff))
+                c.metrics.SlotBehind.WithLabelValues(c.nodeLabels["endpoint"]).
+                    Set(float64(slotDiff))
+                log.Printf("Reference slot: %d, Slot behind: %d", refSlot, slotDiff)
             }
         }
     }()
@@ -189,201 +207,110 @@ func (c *RPCCollector) collectSlotMetrics(ctx context.Context) error {
 }
 
 func (c *RPCCollector) collectBlockMetrics(ctx context.Context) error {
-    // Get current block height first
-    var blockHeight uint64
-    start := time.Now()
-    err := c.localClient.Call(ctx, "getBlockHeight", []interface{}{
+    // Get current slot
+    var slot uint64
+    err := c.localClient.Call(ctx, "getSlot", []interface{}{
         map[string]string{"commitment": "finalized"},
-    }, &blockHeight)
-    duration := time.Since(start)
+    }, &slot)
 
     if err != nil {
-        c.metrics.RPCErrors.WithLabelValues(
-            c.nodeLabels["endpoint"],
-            "getBlockHeight",
-            fmt.Sprintf("%d", err.(*solana.RPCError).Code),
-        ).Inc()
-        return err
+        return fmt.Errorf("get slot: %w", err)
     }
 
     c.metrics.BlockHeight.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(blockHeight))
+        Set(float64(slot))
 
-    c.metrics.RPCLatency.WithLabelValues(
-        c.nodeLabels["endpoint"],
-        "getBlockHeight",
-    ).Observe(duration.Seconds())
-
-    // Get latest block time
-    start = time.Now()
-    var latestBlockTime struct {
-        AbsoluteSlot uint64 `json:"absoluteSlot"`
-        BlockTime    int64  `json:"blockTime"`
-        BlockHeight  uint64 `json:"blockHeight"`
-    }
-    err = c.localClient.Call(ctx, "getBlockTime", []interface{}{blockHeight}, &latestBlockTime)
-    duration = time.Since(start)
-
+    // Get block time for current slot
+    var blockTime int64
+    err = c.localClient.Call(ctx, "getBlockTime", []interface{}{slot}, &blockTime)
     if err != nil {
-        c.metrics.RPCErrors.WithLabelValues(
-            c.nodeLabels["endpoint"],
-            "getBlockTime",
-            fmt.Sprintf("%d", err.(*solana.RPCError).Code),
-        ).Inc()
-        return err
+        return fmt.Errorf("get block time: %w", err)
     }
 
-    if latestBlockTime.BlockTime > 0 {
-        // Calculate seconds since last block
-        timeSinceBlock := time.Now().Unix() - latestBlockTime.BlockTime
+    if blockTime > 0 {
+        timeSinceBlock := time.Now().Unix() - blockTime
         c.metrics.BlockTime.WithLabelValues(c.nodeLabels["endpoint"]).
             Set(float64(timeSinceBlock))
+        log.Printf("Current block - Slot: %d, Time since block: %d seconds", slot, timeSinceBlock)
     }
-
-    c.metrics.RPCLatency.WithLabelValues(
-        c.nodeLabels["endpoint"],
-        "getBlockTime",
-    ).Observe(duration.Seconds())
 
     return nil
 }
 
-func (c *RPCCollector) collectPerformanceMetrics(ctx context.Context) error {
-    var samples []PerformanceSample
-    start := time.Now()
-    err := c.localClient.Call(ctx, "getRecentPerformanceSamples", []interface{}{5}, &samples)
-    duration := time.Since(start)
-
+func (c *RPCCollector) collectNodeStatus(ctx context.Context) error {
+    // Get node health
+    var healthStatus string
+    err := c.localClient.Call(ctx, "getHealth", nil, &healthStatus)
     if err != nil {
-        c.metrics.RPCErrors.WithLabelValues(
-            c.nodeLabels["endpoint"],
-            "getRecentPerformanceSamples",
-            fmt.Sprintf("%d", err.(*solana.RPCError).Code),
-        ).Inc()
-        return err
+        c.metrics.NodeHealth.WithLabelValues(c.nodeLabels["endpoint"]).Set(0)
+        log.Printf("Node health check failed: %v", err)
+        return fmt.Errorf("get health: %w", err)
     }
 
-    c.metrics.RPCLatency.WithLabelValues(
+    isHealthy := healthStatus == "ok"
+    healthValue := 0.0
+    if isHealthy {
+        healthValue = 1.0
+    }
+    c.metrics.NodeHealth.WithLabelValues(c.nodeLabels["endpoint"]).Set(healthValue)
+
+    // Get node version
+    var versionInfo struct {
+        SolanaCore string `json:"solana-core"`
+    }
+    
+    if err := c.localClient.Call(ctx, "getVersion", nil, &versionInfo); err != nil {
+        log.Printf("Failed to get node version: %v", err)
+        return fmt.Errorf("get version: %w", err)
+    }
+
+    c.metrics.NodeVersion.WithLabelValues(
         c.nodeLabels["endpoint"],
-        "getRecentPerformanceSamples",
-    ).Observe(duration.Seconds())
-
-    if len(samples) > 0 {
-        var totalTPS float64
-        maxTPS := float64(0)
-        minTPS := float64(samples[0].NumTransactions) / samples[0].SamplePeriodSecs
-        var totalTx uint64
-
-        for _, sample := range samples {
-            tps := float64(sample.NumTransactions) / sample.SamplePeriodSecs
-            totalTPS += tps
-            totalTx += sample.NumTransactions
-
-            if tps > maxTPS {
-                maxTPS = tps
-            }
-            if tps < minTPS {
-                minTPS = tps
-            }
-        }
-
-        // Set average TPS
-        avgTPS := totalTPS / float64(len(samples))
-        c.metrics.TPS.WithLabelValues(c.nodeLabels["endpoint"]).Set(avgTPS)
-        c.metrics.TPSMax.WithLabelValues(c.nodeLabels["endpoint"]).Set(maxTPS)
-        c.metrics.TPSMin.WithLabelValues(c.nodeLabels["endpoint"]).Set(minTPS)
-        
-        // Update total transaction count
-        c.metrics.TxCount.WithLabelValues(c.nodeLabels["endpoint"]).Add(float64(totalTx))
-    }
+        versionInfo.SolanaCore,
+    ).Set(1)
 
     return nil
 }
 
-func (c *RPCCollector) collectCachedMetrics(ctx context.Context) error {
-    c.cache.mu.RLock()
-    needsVersion := time.Since(c.cache.versionTime) >= c.cache.cacheTimeout
-    needsHealth := time.Since(c.cache.healthTime) >= c.cache.cacheTimeout
-    c.cache.mu.RUnlock()
+func (c *RPCCollector) collectSystemMetrics(ctx context.Context) error {
+    // Collect memory stats
+    var m runtime.MemStats
+    runtime.ReadMemStats(&m)
 
-    var errs []error
+    c.metrics.SystemMemoryTotal.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(m.Sys))
+    c.metrics.SystemMemoryUsed.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(m.Alloc))
+    c.metrics.SystemHeapAlloc.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(m.HeapAlloc))
 
-    if needsVersion {
-        start := time.Now()
-        var versionInfo struct {
-            SolanaCore string `json:"solana-core"`
-        }
+    // Collect goroutine and thread count
+    c.metrics.SystemGoroutines.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(runtime.NumGoroutine()))
+    c.metrics.SystemThreads.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(runtime.NumCPU()))
 
-        err := c.localClient.Call(ctx, "getVersion", nil, &versionInfo)
-        duration := time.Since(start)
-
-        if err != nil {
-            c.metrics.RPCErrors.WithLabelValues(
-                c.nodeLabels["endpoint"],
-                "getVersion",
-                fmt.Sprintf("%d", err.(*solana.RPCError).Code),
-            ).Inc()
-            errs = append(errs, fmt.Errorf("version update: %w", err))
-        } else {
-            c.cache.mu.Lock()
-            c.cache.versionInfo = versionInfo.SolanaCore
-            c.cache.versionTime = time.Now()
-            c.cache.mu.Unlock()
-
-            c.metrics.NodeVersion.WithLabelValues(
-                c.nodeLabels["endpoint"],
-                versionInfo.SolanaCore,
-            ).Set(1)
-
-            c.metrics.RPCLatency.WithLabelValues(
-                c.nodeLabels["endpoint"],
-                "getVersion",
-            ).Observe(duration.Seconds())
-        }
+    // Collect file descriptor stats
+    var rLimit syscall.Rlimit
+    err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+    if err != nil {
+        return fmt.Errorf("get fd limits: %w", err)
     }
 
-    if needsHealth {
-        start := time.Now()
-        var healthStatus string
-        err := c.localClient.Call(ctx, "getHealth", nil, &healthStatus)
-        duration := time.Since(start)
+    c.metrics.SystemMaxFDs.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(rLimit.Max))
+    c.metrics.SystemOpenFDs.WithLabelValues(c.nodeLabels["endpoint"]).
+        Set(float64(rLimit.Cur))
 
-        if err != nil {
-            c.metrics.RPCErrors.WithLabelValues(
-                c.nodeLabels["endpoint"],
-                "getHealth",
-                fmt.Sprintf("%d", err.(*solana.RPCError).Code),
-            ).Inc()
-            errs = append(errs, fmt.Errorf("health update: %w", err))
-        } else {
-            isHealthy := healthStatus == "ok"
-            c.cache.mu.Lock()
-            c.cache.healthStatus = isHealthy
-            c.cache.healthTime = time.Now()
-            c.cache.mu.Unlock()
-
-            healthValue := 0.0
-            if isHealthy {
-                healthValue = 1.0
-            }
-
-            c.metrics.NodeHealth.WithLabelValues(c.nodeLabels["endpoint"]).Set(healthValue)
-
-            c.metrics.RPCLatency.WithLabelValues(
-                c.nodeLabels["endpoint"],
-                "getHealth",
-            ).Observe(duration.Seconds())
-        }
-    }
-
-    if len(errs) > 0 {
-        return fmt.Errorf("multiple cached metric errors: %v", errs)
-    }
+    // Collect GC stats
+    c.metrics.SystemGCDuration.WithLabelValues(c.nodeLabels["endpoint"]).
+        Observe(float64(m.PauseTotalNs) / float64(time.Second))
 
     return nil
 }
 
 // Stop implements the StoppableCollector interface
 func (c *RPCCollector) Stop() error {
+    // Nothing to clean up for RPC collector
     return nil
 }

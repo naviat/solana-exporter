@@ -5,88 +5,49 @@ import (
 )
 
 type Metrics struct {
-    // Slot/Block Metrics
-    CurrentSlot        *prometheus.GaugeVec   // Current processed slot
-    NetworkSlot        *prometheus.GaugeVec   // Reference node's slot
-    SlotBehind         *prometheus.GaugeVec   // How many slots behind reference node
-    BlockHeight        *prometheus.GaugeVec   // Current block height
-    BlockTime          *prometheus.GaugeVec   // Time since last block
-    SlotsPerSecond     *prometheus.GaugeVec   // Slots processed per second
-    SlotProcessingTime *prometheus.GaugeVec   // Time to process each slot
-    
     // Node Status Metrics
     NodeHealth     *prometheus.GaugeVec   // Health status (1=healthy, 0=unhealthy)
     NodeVersion    *prometheus.GaugeVec   // Node version info
     
-    // Performance Metrics
-    TPS            *prometheus.GaugeVec   // Transactions per second
-    TPSMax         *prometheus.GaugeVec   // Max TPS in sample period
-    TPSMin         *prometheus.GaugeVec   // Min TPS in sample period
-    TxCount        *prometheus.CounterVec // Total transaction count
+    // Slot/Epoch Metrics
+    CurrentSlot    *prometheus.GaugeVec   // Current processed slot
+    NetworkSlot    *prometheus.GaugeVec   // Reference node's slot
+    SlotBehind     *prometheus.GaugeVec   // How many slots behind reference node
+    ConfirmedSlot  *prometheus.GaugeVec   // Confirmed slot height
+    SlotHeight     *prometheus.GaugeVec   // Current slot height
     
-    // RPC Metrics
-    RPCLatency     *prometheus.HistogramVec  // RPC response times
-    RPCErrors      *prometheus.CounterVec    // RPC error counts by type
+    // Epoch Details
+    EpochInfo      *prometheus.GaugeVec   // Current epoch information
+    EpochProgress  *prometheus.GaugeVec   // Epoch progress percentage
+    SlotOffset     *prometheus.GaugeVec   // Slot offset within epoch
+    SlotsRemaining *prometheus.GaugeVec   // Slots remaining in epoch
+    ConfirmedEpochNumber      *prometheus.GaugeVec   // Current epoch number
+    ConfirmedEpochFirstSlot   *prometheus.GaugeVec   // First slot of current epoch
+    ConfirmedEpochLastSlot    *prometheus.GaugeVec   // Last slot of current epoch
+    
+    // Block Metrics
+    BlockHeight    *prometheus.GaugeVec   // Current block height
+    BlockTime      *prometheus.GaugeVec   // Time since last block
+
+    // System Metrics of the Exporter
+    SystemMemoryTotal       *prometheus.GaugeVec   // Total system memory
+    SystemMemoryUsed        *prometheus.GaugeVec   // Used system memory
+    SystemCPUUsage         *prometheus.GaugeVec   // CPU usage percentage
+    SystemOpenFDs          *prometheus.GaugeVec   // Open file descriptors
+    SystemMaxFDs           *prometheus.GaugeVec   // Maximum file descriptors allowed
+    SystemThreads          *prometheus.GaugeVec   // Number of OS threads
+    SystemGoroutines       *prometheus.GaugeVec   // Number of goroutines
+    SystemGCDuration       *prometheus.SummaryVec // GC duration
+    SystemHeapAlloc        *prometheus.GaugeVec   // Heap allocation
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
     m := &Metrics{
-        // Slot/Block Metrics
-        CurrentSlot: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_current_slot",
-                Help: "Current processed slot number",
-            },
-            []string{"endpoint", "commitment"},
-        ),
-        NetworkSlot: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_network_slot",
-                Help: "Reference node's slot number",
-            },
-            []string{"endpoint"},
-        ),
-        SlotBehind: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_slot_behind",
-                Help: "Number of slots behind the reference node",
-            },
-            []string{"endpoint"},
-        ),
-        BlockHeight: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_block_height",
-                Help: "Current block height",
-            },
-            []string{"endpoint"},
-        ),
-        BlockTime: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_block_time_seconds",
-                Help: "Time since last block in seconds",
-            },
-            []string{"endpoint"},
-        ),
-        SlotsPerSecond: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_slots_per_second",
-                Help: "Number of slots processed per second",
-            },
-            []string{"endpoint"},
-        ),
-        SlotProcessingTime: prometheus.NewGaugeVec(
-            prometheus.GaugeOpts{
-                Name: "solana_slot_processing_seconds",
-                Help: "Time to process each slot in seconds",
-            },
-            []string{"endpoint"},
-        ),
-
         // Node Status Metrics
         NodeHealth: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
-                Name: "solana_node_health",
-                Help: "Node health status (1 = healthy, 0 = unhealthy)",
+                Name: "solana_is_healthy",
+                Help: "Is node healthy",
             },
             []string{"endpoint"},
         ),
@@ -98,71 +59,200 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
             []string{"endpoint", "version"},
         ),
 
-        // Performance Metrics
-        TPS: prometheus.NewGaugeVec(
+        // Slot/Epoch Metrics
+        CurrentSlot: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
-                Name: "solana_tps_current",
-                Help: "Current transactions per second",
+                Name: "solana_current_slot",
+                Help: "Current processed slot number",
+            },
+            []string{"endpoint", "commitment"},
+        ),
+        NetworkSlot: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_network_slot",
+                Help: "Network's highest known slot",
             },
             []string{"endpoint"},
         ),
-        TPSMax: prometheus.NewGaugeVec(
+        SlotBehind: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
-                Name: "solana_tps_max",
-                Help: "Maximum transactions per second in sample period",
+                Name: "solana_slot_behind",
+                Help: "Number of slots behind the reference node",
             },
             []string{"endpoint"},
         ),
-        TPSMin: prometheus.NewGaugeVec(
+        ConfirmedSlot: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
-                Name: "solana_tps_min",
-                Help: "Minimum transactions per second in sample period",
+                Name: "solana_confirmed_slot_height",
+                Help: "Last confirmed slot height processed",
             },
             []string{"endpoint"},
         ),
-        TxCount: prometheus.NewCounterVec(
-            prometheus.CounterOpts{
-                Name: "solana_transaction_count_total",
-                Help: "Total number of transactions processed",
+        SlotHeight: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_slot_height",
+                Help: "Current slot height",
             },
             []string{"endpoint"},
         ),
 
-        // RPC Metrics
-        RPCLatency: prometheus.NewHistogramVec(
-            prometheus.HistogramOpts{
-                Name: "solana_rpc_latency_seconds",
-                Help: "RPC method latency in seconds",
-                Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0},
+        // Epoch Details
+        EpochInfo: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_epoch",
+                Help: "Current epoch information",
             },
-            []string{"endpoint", "method"},
+            []string{"endpoint"},
         ),
-        RPCErrors: prometheus.NewCounterVec(
-            prometheus.CounterOpts{
-                Name: "solana_rpc_errors_total",
-                Help: "RPC errors by type and method",
+        EpochProgress: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_epoch_progress",
+                Help: "Current epoch progress percentage",
             },
-            []string{"endpoint", "method", "error_code"},
+            []string{"endpoint"},
+        ),
+        SlotOffset: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_slot_offset",
+                Help: "Slot offset within current epoch",
+            },
+            []string{"endpoint"},
+        ),
+        SlotsRemaining: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_slots_remaining",
+                Help: "Slots remaining in current epoch",
+            },
+            []string{"endpoint"},
+        ),
+        ConfirmedEpochNumber: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_confirmed_epoch_number",
+                Help: "Current epoch",
+            },
+            []string{"endpoint"},
+        ),
+        ConfirmedEpochFirstSlot: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_confirmed_epoch_first_slot",
+                Help: "Current epoch's first slot",
+            },
+            []string{"endpoint"},
+        ),
+        ConfirmedEpochLastSlot: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_confirmed_epoch_last_slot",
+                Help: "Current epoch's last slot",
+            },
+            []string{"endpoint"},
+        ),
+
+        // Block Metrics
+        BlockHeight: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_block_height",
+                Help: "Current block height",
+            },
+            []string{"endpoint"},
+        ),
+        BlockTime: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "solana_block_time",
+                Help: "Time since last block in seconds",
+            },
+            []string{"endpoint"},
+        ),
+
+        // System Metrics
+        SystemMemoryTotal: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "process_virtual_memory_bytes",
+                Help: "Virtual memory size in bytes",
+            },
+            []string{"endpoint"},
+        ),
+        SystemMemoryUsed: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "process_resident_memory_bytes",
+                Help: "Resident memory size in bytes",
+            },
+            []string{"endpoint"},
+        ),
+        SystemOpenFDs: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "process_open_fds",
+                Help: "Number of open file descriptors",
+            },
+            []string{"endpoint"},
+        ),
+        SystemMaxFDs: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "process_max_fds",
+                Help: "Maximum number of open file descriptors",
+            },
+            []string{"endpoint"},
+        ),
+        SystemThreads: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_threads",
+                Help: "Number of OS threads created",
+            },
+            []string{"endpoint"},
+        ),
+        SystemGoroutines: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_goroutines",
+                Help: "Number of goroutines that currently exist",
+            },
+            []string{"endpoint"},
+        ),
+        SystemGCDuration: prometheus.NewSummaryVec(
+            prometheus.SummaryOpts{
+                Name: "go_gc_duration_seconds",
+                Help: "A summary of the GC invocation durations",
+                Objectives: map[float64]float64{
+                    0.5:  0.05,
+                    0.9:  0.01,
+                    0.99: 0.001,
+                },
+            },
+            []string{"endpoint"},
+        ),
+        SystemHeapAlloc: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_heap_alloc_bytes",
+                Help: "Number of heap bytes allocated and still in use",
+            },
+            []string{"endpoint"},
         ),
     }
 
     // Register all metrics
     reg.MustRegister(
+        m.NodeHealth,
+        m.NodeVersion,
         m.CurrentSlot,
         m.NetworkSlot,
         m.SlotBehind,
+        m.ConfirmedSlot,
+        m.SlotHeight,
+        m.EpochInfo,
+        m.EpochProgress,
+        m.SlotOffset,
+        m.SlotsRemaining,
+        m.ConfirmedEpochNumber,
+        m.ConfirmedEpochFirstSlot,
+        m.ConfirmedEpochLastSlot,
         m.BlockHeight,
         m.BlockTime,
-        m.SlotsPerSecond,
-        m.SlotProcessingTime,
-        m.NodeHealth,
-        m.NodeVersion,
-        m.TPS,
-        m.TPSMax,
-        m.TPSMin,
-        m.TxCount,
-        m.RPCLatency,
-        m.RPCErrors,
+        m.SystemMemoryTotal,
+        m.SystemMemoryUsed,
+        m.SystemOpenFDs,
+        m.SystemMaxFDs,
+        m.SystemThreads,
+        m.SystemGoroutines,
+        m.SystemGCDuration,
+        m.SystemHeapAlloc,
     )
 
     return m
