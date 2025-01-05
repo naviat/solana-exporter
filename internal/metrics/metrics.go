@@ -29,16 +29,36 @@ type Metrics struct {
     BlockHeight    *prometheus.GaugeVec   // Current block height
     BlockTime      *prometheus.GaugeVec   // Time since last block
 
-    // System Metrics of the Exporter
-    SystemMemoryTotal       *prometheus.GaugeVec   // Total system memory
-    SystemMemoryUsed        *prometheus.GaugeVec   // Used system memory
-    SystemCPUUsage         *prometheus.GaugeVec   // CPU usage percentage
-    SystemOpenFDs          *prometheus.GaugeVec   // Open file descriptors
-    SystemMaxFDs           *prometheus.GaugeVec   // Maximum file descriptors allowed
-    SystemThreads          *prometheus.GaugeVec   // Number of OS threads
-    SystemGoroutines       *prometheus.GaugeVec   // Number of goroutines
-    SystemGCDuration       *prometheus.SummaryVec // GC duration
-    SystemHeapAlloc        *prometheus.GaugeVec   // Heap allocation
+    // Process Metrics
+    ProcessCPUSeconds        *prometheus.CounterVec  // Total CPU time spent
+    ProcessStartTime         *prometheus.GaugeVec    // Process start time
+    ProcessVirtualMemory     *prometheus.GaugeVec    // Virtual memory size
+    ProcessResidentMemory    *prometheus.GaugeVec    // Resident memory size
+    ProcessMaxVirtualMemory  *prometheus.GaugeVec    // Max virtual memory
+    ProcessOpenFDs          *prometheus.GaugeVec     // Open file descriptors
+    ProcessMaxFDs           *prometheus.GaugeVec     // Max file descriptors
+
+    // Go Runtime Metrics
+    GoInfo                  *prometheus.GaugeVec     // Go version information
+    GoThreads               *prometheus.GaugeVec     // Number of OS threads
+    GoGoroutines           *prometheus.GaugeVec     // Number of goroutines
+    GoGCDuration           *prometheus.SummaryVec    // GC duration
+    
+    // Go Memory Stats
+    GoMemStatsAlloc        *prometheus.GaugeVec     // Number of bytes allocated and in use
+    GoMemStatsHeapAlloc    *prometheus.GaugeVec     // Heap bytes allocated and in use
+    GoMemStatsSys          *prometheus.GaugeVec     // Bytes obtained from system
+    GoMemStatsHeapSys      *prometheus.GaugeVec     // Heap bytes obtained from system
+    GoMemStatsHeapIdle     *prometheus.GaugeVec     // Heap bytes waiting to be used
+    GoMemStatsHeapInuse    *prometheus.GaugeVec     // Heap bytes in use
+    GoMemStatsHeapReleased *prometheus.GaugeVec     // Heap bytes released to OS
+    GoMemStatsHeapObjects  *prometheus.GaugeVec     // Number of allocated heap objects
+    GoMemStatsGCCPUFraction *prometheus.GaugeVec    // Fraction of CPU time used by GC
+    GoMemStatsNextGC       *prometheus.GaugeVec     // Heap size at which next GC will trigger
+    GoMemStatsLastGC       *prometheus.GaugeVec     // Time of last GC
+    GoMemStatsStackInuse   *prometheus.GaugeVec     // Bytes in use by stack allocator
+    GoMemStatsMallocs      *prometheus.CounterVec   // Total number of mallocs
+    GoMemStatsFrees        *prometheus.CounterVec   // Total number of frees
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -163,65 +183,190 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
             []string{"endpoint"},
         ),
 
-        // System Metrics
-        SystemMemoryTotal: prometheus.NewGaugeVec(
+        // Process Metrics
+        ProcessCPUSeconds: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "process_cpu_seconds_total",
+                Help: "Total user and system CPU time spent in seconds",
+            },
+            []string{"endpoint"},
+        ),
+        ProcessStartTime: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "process_start_time_seconds",
+                Help: "Start time of the process since unix epoch in seconds",
+            },
+            []string{"endpoint"},
+        ),
+        ProcessVirtualMemory: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "process_virtual_memory_bytes",
                 Help: "Virtual memory size in bytes",
             },
             []string{"endpoint"},
         ),
-        SystemMemoryUsed: prometheus.NewGaugeVec(
+        ProcessResidentMemory: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "process_resident_memory_bytes",
                 Help: "Resident memory size in bytes",
             },
             []string{"endpoint"},
         ),
-        SystemOpenFDs: prometheus.NewGaugeVec(
+        ProcessMaxVirtualMemory: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "process_virtual_memory_max_bytes",
+                Help: "Maximum amount of virtual memory available in bytes",
+            },
+            []string{"endpoint"},
+        ),
+        ProcessOpenFDs: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "process_open_fds",
                 Help: "Number of open file descriptors",
             },
             []string{"endpoint"},
         ),
-        SystemMaxFDs: prometheus.NewGaugeVec(
+        ProcessMaxFDs: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "process_max_fds",
                 Help: "Maximum number of open file descriptors",
             },
             []string{"endpoint"},
         ),
-        SystemThreads: prometheus.NewGaugeVec(
+
+        // Go Runtime Metrics
+        GoInfo: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_info",
+                Help: "Information about the Go environment",
+            },
+            []string{"endpoint", "version"},
+        ),
+        GoThreads: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "go_threads",
                 Help: "Number of OS threads created",
             },
             []string{"endpoint"},
         ),
-        SystemGoroutines: prometheus.NewGaugeVec(
+        GoGoroutines: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "go_goroutines",
                 Help: "Number of goroutines that currently exist",
             },
             []string{"endpoint"},
         ),
-        SystemGCDuration: prometheus.NewSummaryVec(
+        GoGCDuration: prometheus.NewSummaryVec(
             prometheus.SummaryOpts{
                 Name: "go_gc_duration_seconds",
-                Help: "A summary of the GC invocation durations",
+                Help: "A summary of the pause duration of garbage collection cycles",
                 Objectives: map[float64]float64{
-                    0.5:  0.05,
-                    0.9:  0.01,
-                    0.99: 0.001,
+                    0.0:  0.01,
+                    0.25: 0.01,
+                    0.5:  0.01,
+                    0.75: 0.01,
+                    1.0:  0.01,
                 },
             },
             []string{"endpoint"},
         ),
-        SystemHeapAlloc: prometheus.NewGaugeVec(
+
+        // Go Memory Stats
+        GoMemStatsAlloc: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_alloc_bytes",
+                Help: "Number of bytes allocated and still in use",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsHeapAlloc: prometheus.NewGaugeVec(
             prometheus.GaugeOpts{
                 Name: "go_memstats_heap_alloc_bytes",
                 Help: "Number of heap bytes allocated and still in use",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsSys: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_sys_bytes",
+                Help: "Number of bytes obtained from system",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsHeapSys: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_heap_sys_bytes",
+                Help: "Number of heap bytes obtained from system",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsHeapIdle: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_heap_idle_bytes",
+                Help: "Number of heap bytes waiting to be used",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsHeapInuse: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_heap_inuse_bytes",
+                Help: "Number of heap bytes that are in use",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsHeapReleased: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_heap_released_bytes",
+                Help: "Number of heap bytes released to OS",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsHeapObjects: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_heap_objects",
+                Help: "Number of allocated objects",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsGCCPUFraction: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_gc_cpu_fraction",
+                Help: "The fraction of this program's available CPU time used by the GC since the program started",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsNextGC: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_next_gc_bytes",
+                Help: "Number of heap bytes when next garbage collection will take place",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsLastGC: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_last_gc_time_seconds",
+                Help: "Number of seconds since 1970 of last garbage collection",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsStackInuse: prometheus.NewGaugeVec(
+            prometheus.GaugeOpts{
+                Name: "go_memstats_stack_inuse_bytes",
+                Help: "Number of bytes in use by the stack allocator",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsMallocs: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "go_memstats_mallocs_total",
+                Help: "Total number of mallocs",
+            },
+            []string{"endpoint"},
+        ),
+        GoMemStatsFrees: prometheus.NewCounterVec(
+            prometheus.CounterOpts{
+                Name: "go_memstats_frees_total",
+                Help: "Total number of frees",
             },
             []string{"endpoint"},
         ),
@@ -229,8 +374,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 
     // Register all metrics
     reg.MustRegister(
+        // Node Status Metrics
         m.NodeHealth,
         m.NodeVersion,
+        
+        // Slot/Epoch Metrics
         m.CurrentSlot,
         m.NetworkSlot,
         m.SlotBehind,
@@ -243,16 +391,41 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
         m.ConfirmedEpochNumber,
         m.ConfirmedEpochFirstSlot,
         m.ConfirmedEpochLastSlot,
+        
+        // Block Metrics
         m.BlockHeight,
         m.BlockTime,
-        m.SystemMemoryTotal,
-        m.SystemMemoryUsed,
-        m.SystemOpenFDs,
-        m.SystemMaxFDs,
-        m.SystemThreads,
-        m.SystemGoroutines,
-        m.SystemGCDuration,
-        m.SystemHeapAlloc,
+
+        // Process Metrics
+        m.ProcessCPUSeconds,
+        m.ProcessStartTime,
+        m.ProcessVirtualMemory,
+        m.ProcessResidentMemory,
+        m.ProcessMaxVirtualMemory,
+        m.ProcessOpenFDs,
+        m.ProcessMaxFDs,
+
+        // Go Runtime Metrics
+        m.GoInfo,
+        m.GoThreads,
+        m.GoGoroutines,
+        m.GoGCDuration,
+
+        // Go Memory Stats
+        m.GoMemStatsAlloc,
+        m.GoMemStatsHeapAlloc,
+        m.GoMemStatsSys,
+        m.GoMemStatsHeapSys,
+        m.GoMemStatsHeapIdle,
+        m.GoMemStatsHeapInuse,
+        m.GoMemStatsHeapReleased,
+        m.GoMemStatsHeapObjects,
+        m.GoMemStatsGCCPUFraction,
+        m.GoMemStatsNextGC,
+        m.GoMemStatsLastGC,
+        m.GoMemStatsStackInuse,
+        m.GoMemStatsMallocs,
+        m.GoMemStatsFrees,
     )
 
     return m

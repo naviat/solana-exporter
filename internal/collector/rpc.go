@@ -4,7 +4,10 @@ import (
     "context"
     "fmt"
     "log"
+    "os"
     "runtime"
+    "strconv"
+    "strings"
     "sync"
     "syscall"
     "time"
@@ -23,10 +26,20 @@ type collectedMetrics struct {
     epochProgress  float64
     isHealthy      bool
     version        string
+    
+    // System metrics
     memoryUsed     uint64
+    memorySys      uint64
+    memoryHeap     uint64
+    memoryStack    uint64
     openFDs        uint64
     maxFDs         uint64
     goroutines     int
+    cpuSeconds     float64
+    gcCPUFraction  float64
+    lastGC         uint64
+    mallocs        uint64
+    frees          uint64
 }
 
 type RPCCollector struct {
@@ -69,7 +82,12 @@ func (c *RPCCollector) Name() string {
 func (c *RPCCollector) Collect(ctx context.Context) error {
     metrics := &collectedMetrics{}
     endpoint := c.nodeLabels["endpoint"]
-
+    
+    if info, err := os.Stat("/proc/self"); err == nil {
+        startTime := getProcessStartTime(info)
+        c.metrics.ProcessStartTime.WithLabelValues(endpoint).Set(float64(startTime))
+    }
+    
     // Always collect system metrics first as they don't depend on RPC
     if err := c.collectSystemMetrics(ctx, metrics); err != nil {
         log.Printf("[%s] Error collecting system metrics: %v", endpoint, err)
@@ -381,35 +399,106 @@ func (c *RPCCollector) collectNodeStatus(ctx context.Context, metrics *collected
 func (c *RPCCollector) collectSystemMetrics(ctx context.Context, metrics *collectedMetrics) error {
     endpoint := c.nodeLabels["endpoint"]
 
+    // Collect memory statistics
     var m runtime.MemStats
     runtime.ReadMemStats(&m)
 
-    metrics.mu.Lock()
-    metrics.memoryUsed = m.Alloc
-    metrics.goroutines = runtime.NumGoroutine()
-    metrics.mu.Unlock()
+    // Basic memory stats
+    c.metrics.GoMemStatsAlloc.WithLabelValues(endpoint).Set(float64(m.Alloc))
+    c.metrics.GoMemStatsHeapAlloc.WithLabelValues(endpoint).Set(float64(m.HeapAlloc))
+    c.metrics.GoMemStatsSys.WithLabelValues(endpoint).Set(float64(m.Sys))
+    c.metrics.GoMemStatsHeapSys.WithLabelValues(endpoint).Set(float64(m.HeapSys))
+    c.metrics.GoMemStatsHeapIdle.WithLabelValues(endpoint).Set(float64(m.HeapIdle))
+    c.metrics.GoMemStatsHeapInuse.WithLabelValues(endpoint).Set(float64(m.HeapInuse))
+    c.metrics.GoMemStatsHeapReleased.WithLabelValues(endpoint).Set(float64(m.HeapReleased))
+    c.metrics.GoMemStatsHeapObjects.WithLabelValues(endpoint).Set(float64(m.HeapObjects))
+    
+    // GC stats
+    c.metrics.GoMemStatsGCCPUFraction.WithLabelValues(endpoint).Set(m.GCCPUFraction)
+    c.metrics.GoMemStatsNextGC.WithLabelValues(endpoint).Set(float64(m.NextGC))
+    c.metrics.GoMemStatsLastGC.WithLabelValues(endpoint).Set(float64(m.LastGC))
+    c.metrics.GoMemStatsStackInuse.WithLabelValues(endpoint).Set(float64(m.StackInuse))
+    
+    // Malloc/Free counters
+    c.metrics.GoMemStatsMallocs.WithLabelValues(endpoint).Add(float64(m.Mallocs))
+    c.metrics.GoMemStatsFrees.WithLabelValues(endpoint).Add(float64(m.Frees))
 
-    c.metrics.SystemMemoryUsed.WithLabelValues(endpoint).Set(float64(m.Alloc))
-    c.metrics.SystemHeapAlloc.WithLabelValues(endpoint).Set(float64(m.HeapAlloc))
-    c.metrics.SystemGoroutines.WithLabelValues(endpoint).Set(float64(runtime.NumGoroutine()))
-    c.metrics.SystemThreads.WithLabelValues(endpoint).Set(float64(runtime.NumCPU()))
+    // Runtime stats
+    c.metrics.GoThreads.WithLabelValues(endpoint).Set(float64(runtime.NumCPU()))
+    c.metrics.GoGoroutines.WithLabelValues(endpoint).Set(float64(runtime.NumGoroutine()))
+    
+    // Go version info
+    c.metrics.GoInfo.WithLabelValues(endpoint, runtime.Version()).Set(1)
 
+    // Process stats
     var rLimit syscall.Rlimit
-    err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
-    if err != nil {
+    if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
         return fmt.Errorf("get fd limits: %w", err)
     }
 
-    metrics.mu.Lock()
-    metrics.maxFDs = uint64(rLimit.Max)
-    metrics.openFDs = uint64(rLimit.Cur)
-    metrics.mu.Unlock()
+    c.metrics.ProcessMaxFDs.WithLabelValues(endpoint).Set(float64(rLimit.Max))
+    c.metrics.ProcessOpenFDs.WithLabelValues(endpoint).Set(float64(rLimit.Cur))
 
-    c.metrics.SystemMaxFDs.WithLabelValues(endpoint).Set(float64(rLimit.Max))
-    c.metrics.SystemOpenFDs.WithLabelValues(endpoint).Set(float64(rLimit.Cur))
+    // Get process stats using syscall
+    var rusage syscall.Rusage
+    if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err == nil {
+        cpuTimeSeconds := float64(rusage.Utime.Sec+rusage.Stime.Sec) + 
+            float64(rusage.Utime.Usec+rusage.Stime.Usec)/1e6
+        c.metrics.ProcessCPUSeconds.WithLabelValues(endpoint).Add(cpuTimeSeconds)
+    }
+
+    // Process memory stats
+    if info, err := os.ReadFile("/proc/self/stat"); err == nil {
+        var vsize, rss int64
+        fields := strings.Fields(string(info))
+        if len(fields) > 23 {
+            vsize, _ = strconv.ParseInt(fields[22], 10, 64)
+            rss, _ = strconv.ParseInt(fields[23], 10, 64)
+            c.metrics.ProcessVirtualMemory.WithLabelValues(endpoint).Set(float64(vsize))
+            c.metrics.ProcessResidentMemory.WithLabelValues(endpoint).Set(float64(rss * 4096)) // RSS is in pages
+        }
+    }
+
+    // Process start time
+    if startTime, err := os.Stat("/proc/self"); err == nil {
+        c.metrics.ProcessStartTime.WithLabelValues(endpoint).Set(float64(startTime.Sys().(*syscall.Stat_t).Ctim.Sec))
+    }
 
     return nil
 }
+
+// func (c *RPCCollector) collectSystemMetrics(ctx context.Context, metrics *collectedMetrics) error {
+//     endpoint := c.nodeLabels["endpoint"]
+
+//     var m runtime.MemStats
+//     runtime.ReadMemStats(&m)
+
+//     metrics.mu.Lock()
+//     metrics.memoryUsed = m.Alloc
+//     metrics.goroutines = runtime.NumGoroutine()
+//     metrics.mu.Unlock()
+
+//     c.metrics.SystemMemoryUsed.WithLabelValues(endpoint).Set(float64(m.Alloc))
+//     c.metrics.SystemHeapAlloc.WithLabelValues(endpoint).Set(float64(m.HeapAlloc))
+//     c.metrics.SystemGoroutines.WithLabelValues(endpoint).Set(float64(runtime.NumGoroutine()))
+//     c.metrics.SystemThreads.WithLabelValues(endpoint).Set(float64(runtime.NumCPU()))
+
+//     var rLimit syscall.Rlimit
+//     err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+//     if err != nil {
+//         return fmt.Errorf("get fd limits: %w", err)
+//     }
+
+//     metrics.mu.Lock()
+//     metrics.maxFDs = uint64(rLimit.Max)
+//     metrics.openFDs = uint64(rLimit.Cur)
+//     metrics.mu.Unlock()
+
+//     c.metrics.SystemMaxFDs.WithLabelValues(endpoint).Set(float64(rLimit.Max))
+//     c.metrics.SystemOpenFDs.WithLabelValues(endpoint).Set(float64(rLimit.Cur))
+
+//     return nil
+// }
 
 func (c *RPCCollector) Stop() error {
     return nil
