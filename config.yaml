@@ -1,0 +1,21 @@
+rpc:
+  # Local RPC node endpoint
+  endpoint: "http://localhost:8799"
+  # Reference RPC node for comparison (e.g., public RPC endpoints)
+  reference_endpoint: "https://api.mainnet-beta.solana.com"
+  
+  # Connection settings
+  timeout: 30s
+  max_retries: 3
+  retry_backoff: 1s
+  max_requests_per_second: 50
+
+  # Cache settings to minimize RPC calls
+  version_cache_duration: 5m
+  health_cache_duration: 1m
+
+metrics:
+  # Collection intervals
+  slot_metrics_interval: 2s    # How often to check slots
+  health_metrics_interval: 15s  # How often to check health
+  block_metrics_interval: 5s    # How often to check block height/time
