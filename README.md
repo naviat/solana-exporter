@@ -6,43 +6,23 @@ This project monitors Solana RPC metrics using Docker and Docker Compose. It als
 
 This implementation includes:
 
-1. RPC Performance Metrics:
-
-- Latency by method
-- Request/error counts
-- Payload sizes
-- In-flight requests
-
-2. Node Health Metrics:
+1. Node Health Metrics:
 
 - Health status
 - Version information
 - Uptime tracking
 - Restart monitoring
 
-3. Slot and Block Metrics:
+2. Slot and Block Metrics:
 
 - Slot heights and differences
 - Block processing times
 - Chain synchronization status
 
-4. Transaction Metrics:
-
-- Success/error rates
-- Confirmation times
-- Throughput monitoring
-- Queue sizes
-
-5. System Resource Metrics:
+3. System Resource Metrics:
 
 - CPU usage by core
 - Memory usage stats
 - Disk usage and IOPS
 - Network IO
 - File descriptors
-
-6. WebSocket Metrics:
-
-- Connection counts
-- Message rates
-- Error tracking
