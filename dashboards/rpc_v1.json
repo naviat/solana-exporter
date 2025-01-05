@@ -1,544 +1,737 @@
 {
-	"__inputs": [
-		{
-			"name": "DS_PROMETHEUS",
-			"label": "Prometheus",
-			"description": "",
-			"type": "datasource",
-			"pluginId": "prometheus",
-			"pluginName": "Prometheus"
-		}
-	],
-	"description": "Solana RPC Node Monitoring Dashboard. Select your environment using the variables at the top:\n* Cluster: Kubernetes cluster\n* Namespace: Kubernetes namespace\n* Pod: Solana node pod\n* Endpoint: RPC endpoint",
+	"annotations": {
+		"list": [
+			{
+				"builtIn": 1,
+				"datasource": "-- Grafana --",
+				"enable": true,
+				"hide": true,
+				"iconColor": "rgba(0, 211, 255, 1)",
+				"name": "Annotations & Alerts",
+				"target": {
+					"limit": 100,
+					"matchAny": false,
+					"tags": [],
+					"type": "dashboard"
+				}
+			}
+		]
+	},
 	"editable": true,
-	"fiscalYearStartMonth": 0,
 	"graphTooltip": 1,
 	"links": [],
-	"liveNow": false,
 	"panels": [
 		{
-			"datasource": "${DS_PROMETHEUS}",
+			"title": "Node Health",
+			"type": "stat",
 			"gridPos": {
-				"h": 1,
-				"w": 24,
+				"h": 4,
+				"w": 3,
 				"x": 0,
 				"y": 0
 			},
-			"id": 1,
-			"title": "Node Status",
-			"type": "row"
-		},
-		{
+			"options": {
+				"colorMode": "background",
+				"graphMode": "none",
+				"justifyMode": "auto",
+				"textMode": "auto"
+			},
+			"targets": [
+				{
+					"expr": "solana_is_healthy{pod=\"$pod\"}",
+					"instant": true
+				}
+			],
 			"fieldConfig": {
 				"defaults": {
-					"color": {
-						"mode": "thresholds"
-					},
-					"mappings": [],
+					"mappings": [
+						{
+							"type": "value",
+							"options": {
+								"0": {
+									"text": "Unhealthy",
+									"color": "red"
+								},
+								"1": {
+									"text": "Healthy",
+									"color": "green"
+								}
+							}
+						}
+					]
+				}
+			}
+		},
+		{
+			"title": "Current Slot",
+			"type": "stat",
+			"gridPos": {
+				"h": 4,
+				"w": 4,
+				"x": 3,
+				"y": 0
+			},
+			"options": {
+				"colorMode": "value",
+				"graphMode": "area",
+				"justifyMode": "auto",
+				"textMode": "auto"
+			},
+			"targets": [
+				{
+					"expr": "solana_current_slot{pod=\"$pod\",commitment=\"finalized\"}",
+					"instant": false
+				}
+			]
+		},
+		{
+			"title": "Block Time",
+			"type": "stat",
+			"gridPos": {
+				"h": 4,
+				"w": 3,
+				"x": 7,
+				"y": 0
+			},
+			"options": {
+				"colorMode": "value",
+				"graphMode": "area",
+				"justifyMode": "auto"
+			},
+			"targets": [
+				{
+					"expr": "solana_block_time{pod=\"$pod\"}",
+					"instant": false
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "s",
 					"thresholds": {
 						"mode": "absolute",
+						"steps": [
+							{
+								"color": "green",
+								"value": null
+							},
+							{
+								"color": "yellow",
+								"value": 1
+							},
+							{
+								"color": "red",
+								"value": 2
+							}
+						]
+					}
+				}
+			}
+		},
+		{
+			"title": "Slots Behind",
+			"type": "stat",
+			"gridPos": {
+				"h": 4,
+				"w": 3,
+				"x": 10,
+				"y": 0
+			},
+			"options": {
+				"colorMode": "value",
+				"graphMode": "area",
+				"justifyMode": "auto"
+			},
+			"targets": [
+				{
+					"expr": "solana_slot_behind{pod=\"$pod\"}",
+					"instant": false
+				}
+			]
+		},
+		{
+			"title": "Node Version",
+			"type": "stat",
+			"gridPos": {
+				"h": 4,
+				"w": 4,
+				"x": 13,
+				"y": 0
+			},
+			"options": {
+				"colorMode": "none",
+				"textMode": "name"
+			},
+			"targets": [
+				{
+					"expr": "solana_node_version{pod=\"$pod\"}",
+					"instant": true
+				}
+			]
+		},
+		{
+			"title": "Epoch Progress",
+			"type": "gauge",
+			"gridPos": {
+				"h": 4,
+				"w": 4,
+				"x": 17,
+				"y": 0
+			},
+			"options": {
+				"showThresholdLabels": false,
+				"showThresholdMarkers": true
+			},
+			"targets": [
+				{
+					"expr": "solana_epoch_progress{pod=\"$pod\"}",
+					"instant": false
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "percent",
+					"min": 0,
+					"max": 100,
+					"thresholds": {
+						"mode": "percentage",
 						"steps": [
 							{
 								"color": "blue",
 								"value": null
-							}
-						]
-					},
-					"unit": "locale"
-				}
-			},
-			"gridPos": {
-				"h": 3,
-				"w": 4,
-				"x": 0,
-				"y": 1
-			},
-			"id": 2,
-			"options": {
-				"colorMode": "background",
-				"graphMode": "none",
-				"justifyMode": "auto",
-				"orientation": "horizontal",
-				"reduceOptions": {
-					"calcs": [
-						"lastNotNull"
-					],
-					"fields": "",
-					"values": false
-				},
-				"textMode": "auto"
-			},
-			"title": "Current Slot",
-			"type": "stat",
-			"targets": [
-				{
-					"expr": "solana_current_slot{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\", endpoint=\"$endpoint\", commitment=\"finalized\"}",
-					"legendFormat": "Current Slot"
-				}
-			]
-		},
-		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "thresholds"
-					},
-					"mappings": [],
-					"thresholds": {
-						"mode": "absolute",
-						"steps": [
-							{
-								"color": "red",
-								"value": null
 							},
 							{
 								"color": "green",
-								"value": 1
-							}
-						]
-					}
-				}
-			},
-			"gridPos": {
-				"h": 3,
-				"w": 4,
-				"x": 4,
-				"y": 1
-			},
-			"id": 3,
-			"options": {
-				"colorMode": "background",
-				"graphMode": "none",
-				"justifyMode": "auto",
-				"orientation": "horizontal",
-				"reduceOptions": {
-					"calcs": [
-						"lastNotNull"
-					],
-					"fields": "",
-					"values": false
-				},
-				"textMode": "auto"
-			},
-			"title": "Node Health",
-			"type": "stat",
-			"targets": [
-				{
-					"expr": "solana_is_healthy{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\", endpoint=\"$endpoint\"}",
-					"legendFormat": "Health Status"
-				}
-			]
-		},
-		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "thresholds"
-					},
-					"mappings": [],
-					"thresholds": {
-						"mode": "absolute",
-						"steps": [
-							{
-								"color": "yellow",
-								"value": null
-							}
-						]
-					}
-				}
-			},
-			"gridPos": {
-				"h": 3,
-				"w": 4,
-				"x": 8,
-				"y": 1
-			},
-			"id": 4,
-			"options": {
-				"orientation": "auto",
-				"reduceOptions": {
-					"calcs": [
-						"lastNotNull"
-					],
-					"fields": "",
-					"values": false
-				},
-				"showThresholdLabels": false,
-				"showThresholdMarkers": true
-			},
-			"title": "Epoch Progress",
-			"type": "gauge",
-			"targets": [
-				{
-					"expr": "solana_epoch_progress{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\", endpoint=\"$endpoint\"}",
-					"legendFormat": "Progress"
-				}
-			]
-		},
-		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "thresholds"
-					},
-					"mappings": [],
-					"thresholds": {
-						"mode": "absolute",
-						"steps": [
-							{
-								"color": "green",
-								"value": null
+								"value": 50
 							},
 							{
 								"color": "yellow",
 								"value": 80
-							},
-							{
-								"color": "red",
-								"value": 90
 							}
 						]
-					},
-					"unit": "percent"
+					}
 				}
-			},
-			"gridPos": {
-				"h": 3,
-				"w": 4,
-				"x": 12,
-				"y": 1
-			},
-			"id": 5,
-			"options": {
-				"orientation": "auto",
-				"reduceOptions": {
-					"calcs": [
-						"lastNotNull"
-					],
-					"fields": "",
-					"values": false
-				},
-				"showThresholdLabels": false,
-				"showThresholdMarkers": true
-			},
-			"title": "Memory Usage",
-			"type": "gauge",
-			"targets": [
-				{
-					"expr": "100 * (1 - node_memory_MemAvailable_bytes{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\"} / node_memory_MemTotal_bytes{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\"})",
-					"legendFormat": "Memory Usage"
-				}
-			]
+			}
 		},
 		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "thresholds"
-					},
-					"mappings": [],
-					"thresholds": {
-						"mode": "absolute",
-						"steps": [
-							{
-								"color": "green",
-								"value": null
-							},
-							{
-								"color": "yellow",
-								"value": 80
-							},
-							{
-								"color": "red",
-								"value": 90
-							}
-						]
-					},
-					"unit": "percent"
-				}
-			},
+			"title": "Slot Progress",
+			"type": "timeseries",
 			"gridPos": {
-				"h": 3,
-				"w": 4,
-				"x": 16,
-				"y": 1
-			},
-			"id": 6,
-			"options": {
-				"orientation": "auto",
-				"reduceOptions": {
-					"calcs": [
-						"lastNotNull"
-					],
-					"fields": "",
-					"values": false
-				},
-				"showThresholdLabels": false,
-				"showThresholdMarkers": true
-			},
-			"title": "CPU Usage",
-			"type": "gauge",
-			"targets": [
-				{
-					"expr": "100 - (avg by (instance) (irate(node_cpu_seconds_total{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\", mode=\"idle\"}[5m])) * 100)",
-					"legendFormat": "CPU Usage"
-				}
-			]
-		},
-		{
-			"gridPos": {
-				"h": 1,
-				"w": 24,
+				"h": 8,
+				"w": 8,
 				"x": 0,
 				"y": 4
 			},
-			"id": 7,
-			"title": "Solana Performance",
-			"type": "row"
-		},
-		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "palette-classic"
-					},
-					"custom": {
-						"axisLabel": "",
-						"axisPlacement": "auto",
-						"barAlignment": 0,
-						"drawStyle": "line",
-						"fillOpacity": 10,
-						"gradientMode": "none",
-						"hideFrom": {
-							"legend": false,
-							"tooltip": false,
-							"viz": false
-						},
-						"lineInterpolation": "linear",
-						"lineWidth": 1,
-						"pointSize": 5,
-						"scaleDistribution": {
-							"type": "linear"
-						},
-						"showPoints": "never",
-						"spanNulls": true
-					},
-					"mappings": [],
-					"thresholds": {
-						"mode": "absolute",
-						"steps": [
-							{
-								"color": "green",
-								"value": null
-							}
-						]
-					}
-				}
-			},
-			"gridPos": {
-				"h": 8,
-				"w": 12,
-				"x": 0,
-				"y": 5
-			},
-			"id": 8,
 			"options": {
 				"legend": {
+					"displayMode": "table",
+					"placement": "bottom",
 					"calcs": [
 						"mean",
 						"max",
 						"min"
-					],
-					"displayMode": "list",
-					"placement": "bottom"
-				},
-				"tooltip": {
-					"mode": "single"
+					]
 				}
 			},
-			"title": "Slots Behind",
-			"type": "timeseries",
 			"targets": [
 				{
-					"expr": "solana_slot_behind{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\", endpoint=\"$endpoint\"}",
-					"legendFormat": "Slots Behind"
+					"expr": "solana_current_slot{pod=\"$pod\",commitment=\"finalized\"}",
+					"legendFormat": "Current Slot"
+				},
+				{
+					"expr": "solana_network_slot{pod=\"$pod\"}",
+					"legendFormat": "Network Slot"
 				}
 			]
 		},
 		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "palette-classic"
-					},
-					"custom": {
-						"axisLabel": "",
-						"axisPlacement": "auto",
-						"barAlignment": 0,
-						"drawStyle": "line",
-						"fillOpacity": 10,
-						"gradientMode": "none",
-						"hideFrom": {
-							"legend": false,
-							"tooltip": false,
-							"viz": false
-						},
-						"lineInterpolation": "linear",
-						"lineWidth": 1,
-						"pointSize": 5,
-						"scaleDistribution": {
-							"type": "linear"
-						},
-						"showPoints": "never",
-						"spanNulls": true
-					},
-					"mappings": [],
-					"thresholds": {
-						"mode": "absolute",
-						"steps": [
-							{
-								"color": "green",
-								"value": null
-							}
-						]
-					},
-					"unit": "s"
+			"title": "Block Time Trend",
+			"type": "timeseries",
+			"gridPos": {
+				"h": 8,
+				"w": 8,
+				"x": 8,
+				"y": 4
+			},
+			"options": {
+				"legend": {
+					"displayMode": "table",
+					"placement": "bottom",
+					"calcs": [
+						"mean",
+						"max"
+					]
 				}
 			},
+			"targets": [
+				{
+					"expr": "solana_block_time{pod=\"$pod\"}",
+					"legendFormat": "Block Time"
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "s",
+					"custom": {
+						"spanNulls": true
+					}
+				}
+			}
+		},
+		{
+			"title": "System Resources",
+			"type": "timeseries",
+			"gridPos": {
+				"h": 8,
+				"w": 8,
+				"x": 16,
+				"y": 4
+			},
+			"options": {
+				"legend": {
+					"displayMode": "table",
+					"placement": "bottom",
+					"calcs": [
+						"mean",
+						"max"
+					]
+				}
+			},
+			"targets": [
+				{
+					"expr": "rate(node_cpu_seconds_total{pod=\"$pod\",mode!=\"idle\"}[5m])*100",
+					"legendFormat": "CPU {{cpu}} {{mode}}"
+				}
+			],
+			"fieldConfig": {
+				"defaults": {
+					"unit": "percent"
+				}
+			}
+		},
+		{
+			"title": "Disk1 Metrics",
+			"type": "timeseries",
+			"gridPos": {
+				"h": 8,
+				"w": 12,
+				"x": 0,
+				"y": 12
+			},
+			"options": {
+				"legend": {
+					"displayMode": "table",
+					"placement": "bottom",
+					"calcs": [
+						"mean",
+						"max"
+					]
+				}
+			},
+			"targets": [
+				{
+					"expr": "rate(node_disk_read_bytes_total{pod=\"$pod\",mountpoint=\"/pv-disks/disk1\"}[5m])",
+					"legendFormat": "Read Bytes"
+				},
+				{
+					"expr": "rate(node_disk_written_bytes_total{pod=\"$pod\",mountpoint=\"/pv-disks/disk1\"}[5m])",
+					"legendFormat": "Write Bytes"
+				},
+				{
+					"expr": "node_filesystem_avail_bytes{pod=\"$pod\",mountpoint=\"/pv-disks/disk1\"} / node_filesystem_size_bytes{pod=\"$pod\",mountpoint=\"/pv-disks/disk1\"} * 100",
+					"legendFormat": "Available Space %"
+				}
+			]
+		},
+		{
+			"title": "Disk2 Metrics",
+			"type": "timeseries",
 			"gridPos": {
 				"h": 8,
 				"w": 12,
 				"x": 12,
-				"y": 5
+				"y": 12
 			},
-			"id": 9,
 			"options": {
 				"legend": {
-					"calcs": [
-						"mean",
-						"max",
-						"min"
-					],
-					"displayMode": "list",
-					"placement": "bottom"
-				},
-				"tooltip": {
-					"mode": "single"
-				}
-			},
-			"title": "Block Time",
-			"type": "timeseries",
-			"targets": [
-				{
-					"expr": "solana_block_time{cluster=\"$cluster\", namespace=\"$namespace\", pod=\"$pod\", endpoint=\"$endpoint\"}",
-					"legendFormat": "Time since last block"
-				}
-			]
-		},
-		{
-			"gridPos": {
-				"h": 1,
-				"w": 24,
-				"x": 0,
-				"y": 13
-			},
-			"id": 10,
-			"title": "System Metrics",
-			"type": "row"
-		},
-		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "palette-classic"
-					},
-					"custom": {
-						"axisLabel": "",
-						"axisPlacement": "auto",
-						"barAlignment": 0,
-						"drawStyle": "line",
-						"fillOpacity": 10,
-						"gradientMode": "none",
-						"hideFrom": {
-							"legend": false,
-							"tooltip": false,
-							"viz": false
-						},
-						"lineInterpolation": "linear",
-						"lineWidth": 1,
-						"pointSize": 5,
-						"scaleDistribution": {
-							"type": "linear"
-						},
-						"showPoints": "never",
-						"spanNulls": true
-					},
-					"mappings": [],
-					"thresholds": {
-						"mode": "absolute",
-						"steps": [
-							{
-								"color": "green",
-								"value": null
-							}
-						]
-					},
-					"unit": "percent"
-				}
-			},
-			"gridPos": {
-				"h": 8,
-				"w": 12,
-				"x": 0,
-				"y": 14
-			},
-			"id": 11,
-			"options": {
-				"legend": {
+					"displayMode": "table",
+					"placement": "bottom",
 					"calcs": [
 						"mean",
 						"max"
-					],
-					"displayMode": "list",
-					"placement": "bottom"
-				},
-				"tooltip": {
-					"mode": "multi"
+					]
 				}
 			},
-			"title": "Disk Usage",
-			"type": "timeseries",
 			"targets": [
 				{
-					"expr": "100 - ((node_filesystem_avail_bytes{cluster=\"$cluster\",namespace=\"$namespace\",pod=\"$pod\",mountpoint=\"/pv-disks/disk1\"} * 100) / node_filesystem_size_bytes{cluster=\"$cluster\",namespace=\"$namespace\",pod=\"$pod\",mountpoint=\"/pv-disks/disk1\"})",
-					"legendFormat": "Disk 1"
+					"expr": "rate(node_disk_read_bytes_total{pod=\"$pod\",mountpoint=\"/pv-disks/disk2\"}[5m])",
+					"legendFormat": "Read Bytes"
 				},
 				{
-					"expr": "100 - ((node_filesystem_avail_bytes{cluster=\"$cluster\",namespace=\"$namespace\",pod=\"$pod\",mountpoint=\"/pv-disks/disk2\"} * 100) / node_filesystem_size_bytes{cluster=\"$cluster\",namespace=\"$namespace\",pod=\"$pod\",mountpoint=\"/pv-disks/disk2\"})",
-					"legendFormat": "Disk 2"
+					"expr": "rate(node_disk_written_bytes_total{pod=\"$pod\",mountpoint=\"/pv-disks/disk2\"}[5m])",
+					"legendFormat": "Write Bytes"
+				},
+				{
+					"expr": "node_filesystem_avail_bytes{pod=\"$pod\",mountpoint=\"/pv-disks/disk2\"} / node_filesystem_size_bytes{pod=\"$pod\",mountpoint=\"/pv-disks/disk2\"} * 100",
+					"legendFormat": "Available Space %"
 				}
 			]
+		}
+	],
+	"templating": {
+		"list": [
+			{
+				"name": "DS_PROMETHEUS",
+				"label": "Datasource",
+				"type": "datasource",
+				"pluginId": "prometheus",
+				"multi": false
+			},
+			{
+				"name": "pod",
+				"type": "query",
+				"datasource": "${DS_PROMETHEUS}",
+				"query": "label_values(solana_is_healthy, pod)",
+				"refresh": 2,
+				"regex": "",
+				"sort": 1
+			}
+		]
+	},
+	"time": {
+		"from": "now-6h",
+		"to": "now"
+	},
+	"refresh": "10s",
+	{
+		"title": "Network Traffic & Errors",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 0,
+			"y": 20
 		},
-		{
-			"fieldConfig": {
-				"defaults": {
-					"color": {
-						"mode": "palette-classic"
-					},
-					"custom": {
-						"axisLabel": "",
-						"axisPlacement": "auto",
-						"barAlignment": 0,
-						"drawStyle": "line",
-						"fillOpacity": 10,
-						"gradientMode": "none",
-						"hideFrom": {
-							"legend": false,
-							"tooltip": false,
-							"viz": false
-						},
-						"lineInterpolation": "linear",
-						"lineWidth": 1,
-						"pointSize": 5,
-						"scaleDistribution": {
-							"type": "linear"
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "rate(node_network_receive_bytes_total{pod=\"$pod\",device!=\"lo\"}[5m])",
+				"legendFormat": "Receive {{device}}"
+			},
+			{
+				"expr": "rate(node_network_transmit_bytes_total{pod=\"$pod\",device!=\"lo\"}[5m])",
+				"legendFormat": "Transmit {{device}}"
+			},
+			{
+				"expr": "rate(node_network_receive_errs_total{pod=\"$pod\",device!=\"lo\"}[5m])",
+				"legendFormat": "Errors Rx {{device}}"
+			},
+			{
+				"expr": "rate(node_network_transmit_errs_total{pod=\"$pod\",device!=\"lo\"}[5m])",
+				"legendFormat": "Errors Tx {{device}}"
+			}
+		],
+		"fieldConfig": {
+			"defaults": {
+				"unit": "bytes",
+				"custom": {
+					"drawStyle": "line",
+					"lineInterpolation": "smooth",
+					"fillOpacity": 10
+				}
+			}
+		}
+	},
+	{
+		"title": "TCP Connections",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 12,
+			"y": 20
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"lastNotNull",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "node_netstat_Tcp_CurrEstab{pod=\"$pod\"}",
+				"legendFormat": "Established"
+			},
+			{
+				"expr": "node_netstat_Tcp_TimeWait{pod=\"$pod\"}",
+				"legendFormat": "Time Wait"
+			},
+			{
+				"expr": "node_netstat_Tcp_ActiveOpens{pod=\"$pod\"}",
+				"legendFormat": "Active Opens"
+			}
+		]
+	},
+	{
+		"title": "Goroutines & Threads",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 0,
+			"y": 28
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "go_goroutines{pod=\"$pod\"}",
+				"legendFormat": "Goroutines"
+			},
+			{
+				"expr": "go_threads{pod=\"$pod\"}",
+				"legendFormat": "Threads"
+			}
+		]
+	},
+	{
+		"title": "GC Duration",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 12,
+			"y": 28
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "rate(go_gc_duration_seconds_sum{pod=\"$pod\"}[5m])",
+				"legendFormat": "GC Duration Rate"
+			},
+			{
+				"expr": "go_gc_duration_seconds_count{pod=\"$pod\"}",
+				"legendFormat": "GC Count"
+			}
+		],
+		"fieldConfig": {
+			"defaults": {
+				"unit": "s"
+			}
+		}
+	},
+	{
+		"title": "Memory Allocation Details",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 0,
+			"y": 36
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "go_memstats_alloc_bytes{pod=\"$pod\"}",
+				"legendFormat": "Bytes Allocated"
+			},
+			{
+				"expr": "go_memstats_heap_alloc_bytes{pod=\"$pod\"}",
+				"legendFormat": "Heap Allocated"
+			},
+			{
+				"expr": "go_memstats_stack_inuse_bytes{pod=\"$pod\"}",
+				"legendFormat": "Stack In Use"
+			},
+			{
+				"expr": "go_memstats_heap_objects{pod=\"$pod\"}",
+				"legendFormat": "Heap Objects"
+			}
+		],
+		"fieldConfig": {
+			"defaults": {
+				"unit": "bytes"
+			}
+		}
+	},
+	{
+		"title": "Memory GC Stats",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 12,
+			"y": 36
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "rate(go_memstats_mallocs_total{pod=\"$pod\"}[5m])",
+				"legendFormat": "Mallocs Rate"
+			},
+			{
+				"expr": "rate(go_memstats_frees_total{pod=\"$pod\"}[5m])",
+				"legendFormat": "Frees Rate"
+			},
+			{
+				"expr": "go_memstats_gc_cpu_fraction{pod=\"$pod\"}",
+				"legendFormat": "GC CPU Fraction"
+			}
+		]
+	},
+	{
+		"title": "Process Stats",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 0,
+			"y": 44
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "process_resident_memory_bytes{pod=\"$pod\"}",
+				"legendFormat": "Resident Memory"
+			},
+			{
+				"expr": "process_virtual_memory_bytes{pod=\"$pod\"}",
+				"legendFormat": "Virtual Memory"
+			},
+			{
+				"expr": "process_open_fds{pod=\"$pod\"}",
+				"legendFormat": "Open FDs"
+			}
+		],
+		"fieldConfig": {
+			"defaults": {
+				"unit": "bytes"
+			}
+		}
+	},
+	{
+		"title": "Disk IO Latency",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 12,
+			"x": 12,
+			"y": 44
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "rate(node_disk_io_time_seconds_total{pod=\"$pod\",device=~\".*disk1|.*disk2\"}[5m])",
+				"legendFormat": "IO Time {{device}}"
+			},
+			{
+				"expr": "rate(node_disk_io_time_weighted_seconds_total{pod=\"$pod\",device=~\".*disk1|.*disk2\"}[5m])",
+				"legendFormat": "IO Time Weighted {{device}}"
+			},
+			{
+				"expr": "node_disk_io_now{pod=\"$pod\",device=~\".*disk1|.*disk2\"}",
+				"legendFormat": "IO Operations {{device}}"
+			}
+		],
+		"fieldConfig": {
+			"defaults": {
+				"unit": "s"
+			}
+		}
+	},
+	{
+		"title": "Disk IO Queue",
+		"type": "timeseries",
+		"gridPos": {
+			"h": 8,
+			"w": 24,
+			"x": 0,
+			"y": 52
+		},
+		"options": {
+			"legend": {
+				"displayMode": "table",
+				"placement": "bottom",
+				"calcs": [
+					"mean",
+					"max"
+				]
+			}
+		},
+		"targets": [
+			{
+				"expr": "node_disk_io_time_weighted_seconds_total{pod=\"$pod\",device=~\".*disk1|.*disk2\"} / node_disk_io_time_seconds_total{pod=\"$pod\",device=~\".*disk1|.*disk2\"}",
+				"legendFormat": "Average Queue Length {{device}}"
+			},
+			{
+				"expr": "rate(node_disk_io_time_seconds_total{pod=\"$pod\",device=~\".*disk1|.*disk2\"}[5m]) * 100",
+				"legendFormat": "Utilization % {{device}}"
+			}
+		]
+	}
+}
