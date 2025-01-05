@@ -12,6 +12,23 @@ import (
     "solana-exporter/pkg/solana"
 )
 
+// collectedMetrics holds all metrics for consistent logging
+type collectedMetrics struct {
+    mu             sync.Mutex
+    slot           uint64
+    referenceSlot  uint64
+    slotBehind     uint64
+    blockTime      int64
+    epoch          uint64
+    epochProgress  float64
+    isHealthy      bool
+    version        string
+    memoryUsed     uint64
+    openFDs        uint64
+    maxFDs         uint64
+    goroutines     int
+}
+
 type RPCCollector struct {
     localClient     *solana.Client
     referenceClient *solana.Client
@@ -30,10 +47,10 @@ type metricCache struct {
 }
 
 func NewRPCCollector(localClient, referenceClient *solana.Client, metrics *metrics.Metrics, labels map[string]string) *RPCCollector {
-    // Add default endpoint label if not present
-    if _, ok := labels["endpoint"]; !ok {
-        labels["endpoint"] = localClient.GetEndpoint()
+    if labels == nil {
+        labels = make(map[string]string)
     }
+    labels["endpoint"] = localClient.GetEndpoint()
     return &RPCCollector{
         localClient:     localClient,
         referenceClient: referenceClient,
@@ -50,34 +67,190 @@ func (c *RPCCollector) Name() string {
 }
 
 func (c *RPCCollector) Collect(ctx context.Context) error {
-    var wg sync.WaitGroup
-    errCh := make(chan error, 4)
+    metrics := &collectedMetrics{}
+    endpoint := c.nodeLabels["endpoint"]
 
+    // Always collect system metrics first as they don't depend on RPC
+    if err := c.collectSystemMetrics(ctx, metrics); err != nil {
+        log.Printf("[%s] Error collecting system metrics: %v", endpoint, err)
+    }
+
+    // Create wait group and error channel for concurrent collection
+    var wg sync.WaitGroup
+    errCh := make(chan error, 4) // Buffer size matches number of concurrent collectors
+
+    // Launch collectors concurrently
     collectors := []struct {
         name string
-        fn   func(context.Context) error
+        fn   func(context.Context, *collectedMetrics) error
     }{
-        {"slot", c.collectSlotMetrics},
-        {"block", c.collectBlockMetrics},
-        {"epoch", c.collectEpochInfo},
-        {"system", c.collectSystemMetrics},
+        {"node status", c.collectNodeStatus},
+        {"slot metrics", c.collectSlotMetrics},
+        {"epoch info", c.collectEpochInfo},
+        {"block metrics", c.collectBlockMetrics},
     }
 
     for _, collector := range collectors {
         wg.Add(1)
-        go func(name string, fn func(context.Context) error) {
+        go func(name string, fn func(context.Context, *collectedMetrics) error) {
             defer wg.Done()
-            if err := fn(ctx); err != nil {
-                log.Printf("Error collecting %s metrics: %v", name, err)
+            if err := fn(ctx, metrics); err != nil {
                 errCh <- fmt.Errorf("%s: %w", name, err)
+                log.Printf("[%s] Error collecting %s: %v", endpoint, name, err)
             }
         }(collector.name, collector.fn)
     }
 
-    // Collect node status metrics
-    if err := c.collectNodeStatus(ctx); err != nil {
-        errCh <- fmt.Errorf("node status: %w", err)
+    // Wait for all collectors to complete
+    wg.Wait()
+    close(errCh)
+
+    // Gather any errors that occurred
+    var collectionErrors []error
+    for err := range errCh {
+        collectionErrors = append(collectionErrors, err)
     }
+
+    // Log system metrics even if there are errors
+    log.Printf("[%s] System Stats | Goroutines=%d, Memory=%d bytes, FDs=%d/%d",
+        endpoint,
+        metrics.goroutines,
+        metrics.memoryUsed,
+        metrics.openFDs,
+        metrics.maxFDs)
+
+    // Log Solana metrics if available
+    if metrics.slot > 0 {
+        log.Printf("[%s] Solana Stats | Slot=%d (Behind=%d) | Epoch=%d (Progress=%.2f%%) | Version=%s | Healthy=%v",
+            endpoint,
+            metrics.slot,
+            metrics.slotBehind,
+            metrics.epoch,
+            metrics.epochProgress,
+            metrics.version,
+            metrics.isHealthy)
+    }
+
+    if len(collectionErrors) > 0 {
+        log.Printf("[%s] Collection errors: %v", endpoint, collectionErrors)
+        return fmt.Errorf("multiple collection errors occurred: %v", collectionErrors)
+    }
+
+    return nil
+}
+// Run sequence to get metrics............
+// func (c *RPCCollector) Collect(ctx context.Context) error {
+//     metrics := &collectedMetrics{}
+//     endpoint := c.nodeLabels["endpoint"]
+
+//     // Always collect system metrics first as they don't depend on RPC
+//     if err := c.collectSystemMetrics(ctx, metrics); err != nil {
+//         log.Printf("[%s] Error collecting system metrics: %v", endpoint, err)
+//     }
+
+//     // Try to collect Solana metrics
+//     var collectionErrors []error
+
+//     // Collect in sequence to avoid overwhelming the RPC node
+//     if err := c.collectNodeStatus(ctx, metrics); err != nil {
+//         collectionErrors = append(collectionErrors, fmt.Errorf("node status: %w", err))
+//     }
+
+//     if err := c.collectSlotMetrics(ctx, metrics); err != nil {
+//         collectionErrors = append(collectionErrors, fmt.Errorf("slot metrics: %w", err))
+//     }
+
+//     if err := c.collectEpochInfo(ctx, metrics); err != nil {
+//         collectionErrors = append(collectionErrors, fmt.Errorf("epoch info: %w", err))
+//     }
+
+//     if err := c.collectBlockMetrics(ctx, metrics); err != nil {
+//         collectionErrors = append(collectionErrors, fmt.Errorf("block metrics: %w", err))
+//     }
+
+//     // Log system metrics even if there are errors
+//     log.Printf("[%s] System Stats | Goroutines=%d, Memory=%d bytes, FDs=%d/%d",
+//         endpoint,
+//         metrics.goroutines,
+//         metrics.memoryUsed,
+//         metrics.openFDs,
+//         metrics.maxFDs)
+
+//     // Log Solana metrics if available
+//     if metrics.slot > 0 {
+//         log.Printf("[%s] Solana Stats | Slot=%d (Behind=%d) | Epoch=%d (Progress=%.2f%%) | Version=%s | Healthy=%v",
+//             endpoint,
+//             metrics.slot,
+//             metrics.slotBehind,
+//             metrics.epoch,
+//             metrics.epochProgress,
+//             metrics.version,
+//             metrics.isHealthy)
+//     }
+
+//     if len(collectionErrors) > 0 {
+//         log.Printf("[%s] Collection errors: %v", endpoint, collectionErrors)
+//         return fmt.Errorf("collection errors occurred")
+//     }
+
+//     return nil
+// }
+
+func (c *RPCCollector) collectSlotMetrics(ctx context.Context, metrics *collectedMetrics) error {
+    endpoint := c.nodeLabels["endpoint"]
+    var (
+        wg    sync.WaitGroup
+        errCh = make(chan error, 2)
+    )
+
+    // Get local node slot
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        err := c.localClient.Call(ctx, "getSlot", []interface{}{
+            map[string]string{"commitment": "finalized"},
+        }, &metrics.slot)
+
+        if err != nil {
+            log.Printf("[%s] Failed to get local slot: %v", endpoint, err)
+            errCh <- err
+            return
+        }
+
+        metrics.mu.Lock()
+        c.metrics.CurrentSlot.WithLabelValues(
+            endpoint,
+            "finalized",
+        ).Set(float64(metrics.slot))
+        metrics.mu.Unlock()
+    }()
+
+    // Get reference node slot
+    wg.Add(1)
+    go func() {
+        defer wg.Done()
+        err := c.referenceClient.Call(ctx, "getSlot", []interface{}{
+            map[string]string{"commitment": "finalized"},
+        }, &metrics.referenceSlot)
+
+        if err != nil {
+            log.Printf("[%s] Failed to get reference slot: %v", endpoint, err)
+            errCh <- err
+            return
+        }
+
+        metrics.mu.Lock()
+        c.metrics.NetworkSlot.WithLabelValues(endpoint).Set(float64(metrics.referenceSlot))
+
+        if metrics.slot > 0 && metrics.referenceSlot > 0 {
+            slotDiff := metrics.referenceSlot - metrics.slot
+            if slotDiff >= 0 {
+                metrics.slotBehind = slotDiff
+                c.metrics.SlotBehind.WithLabelValues(endpoint).Set(float64(slotDiff))
+            }
+        }
+        metrics.mu.Unlock()
+    }()
 
     wg.Wait()
     close(errCh)
@@ -88,15 +261,43 @@ func (c *RPCCollector) Collect(ctx context.Context) error {
             errs = append(errs, err)
         }
     }
-
     if len(errs) > 0 {
-        return fmt.Errorf("collection errors: %v", errs)
+        return fmt.Errorf("slot metrics: %v", errs)
     }
 
     return nil
 }
 
-func (c *RPCCollector) collectEpochInfo(ctx context.Context) error {
+func (c *RPCCollector) collectBlockMetrics(ctx context.Context, metrics *collectedMetrics) error {
+    endpoint := c.nodeLabels["endpoint"]
+
+    err := c.localClient.Call(ctx, "getSlot", []interface{}{
+        map[string]string{"commitment": "finalized"},
+    }, &metrics.slot)
+
+    if err != nil {
+        return fmt.Errorf("get slot: %w", err)
+    }
+
+    c.metrics.BlockHeight.WithLabelValues(endpoint).Set(float64(metrics.slot))
+
+    // Get block time
+    err = c.localClient.Call(ctx, "getBlockTime", []interface{}{metrics.slot}, &metrics.blockTime)
+    if err != nil {
+        return fmt.Errorf("get block time: %w", err)
+    }
+
+    if metrics.blockTime > 0 {
+        timeSinceBlock := time.Now().Unix() - metrics.blockTime
+        c.metrics.BlockTime.WithLabelValues(endpoint).Set(float64(timeSinceBlock))
+    }
+
+    return nil
+}
+
+func (c *RPCCollector) collectEpochInfo(ctx context.Context, metrics *collectedMetrics) error {
+    endpoint := c.nodeLabels["endpoint"]
+
     type EpochInfo struct {
         AbsoluteSlot  uint64 `json:"absoluteSlot"`
         BlockHeight   uint64 `json:"blockHeight"`
@@ -114,203 +315,102 @@ func (c *RPCCollector) collectEpochInfo(ctx context.Context) error {
         return fmt.Errorf("get epoch info: %w", err)
     }
 
-    c.metrics.EpochInfo.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(epochInfo.Epoch))
-    
-    c.metrics.SlotOffset.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(epochInfo.SlotIndex))
+    metrics.mu.Lock()
+    metrics.epoch = epochInfo.Epoch
+    metrics.epochProgress = (float64(epochInfo.SlotIndex) / float64(epochInfo.SlotsInEpoch)) * 100
+    metrics.mu.Unlock()
+
+    c.metrics.EpochInfo.WithLabelValues(endpoint).Set(float64(epochInfo.Epoch))
+    c.metrics.SlotOffset.WithLabelValues(endpoint).Set(float64(epochInfo.SlotIndex))
 
     slotsRemaining := epochInfo.SlotsInEpoch - epochInfo.SlotIndex
-    c.metrics.SlotsRemaining.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(slotsRemaining))
+    c.metrics.SlotsRemaining.WithLabelValues(endpoint).Set(float64(slotsRemaining))
+    c.metrics.EpochProgress.WithLabelValues(endpoint).Set(metrics.epochProgress)
 
-    progress := (float64(epochInfo.SlotIndex) / float64(epochInfo.SlotsInEpoch)) * 100
-    c.metrics.EpochProgress.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(progress)
-
-    // Record epoch boundaries
     epochStartSlot := epochInfo.AbsoluteSlot - epochInfo.SlotIndex
-    c.metrics.ConfirmedEpochFirstSlot.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(epochStartSlot))
-    c.metrics.ConfirmedEpochLastSlot.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(epochStartSlot + epochInfo.SlotsInEpoch))
-    c.metrics.ConfirmedEpochNumber.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(epochInfo.Epoch))
+    c.metrics.ConfirmedEpochFirstSlot.WithLabelValues(endpoint).Set(float64(epochStartSlot))
+    c.metrics.ConfirmedEpochLastSlot.WithLabelValues(endpoint).Set(float64(epochStartSlot + epochInfo.SlotsInEpoch))
+    c.metrics.ConfirmedEpochNumber.WithLabelValues(endpoint).Set(float64(epochInfo.Epoch))
 
     return nil
 }
 
-func (c *RPCCollector) collectSlotMetrics(ctx context.Context) error {
-    var (
-        localSlot uint64
-        refSlot   uint64
-        wg        sync.WaitGroup
-        errCh     = make(chan error, 2)
-    )
+func (c *RPCCollector) collectNodeStatus(ctx context.Context, metrics *collectedMetrics) error {
+    endpoint := c.nodeLabels["endpoint"]
 
-    // Get local node slot
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        err := c.localClient.Call(ctx, "getSlot", []interface{}{
-            map[string]string{"commitment": "finalized"},
-        }, &localSlot)
-
-        if err != nil {
-            errCh <- err
-            return
-        }
-
-        c.metrics.CurrentSlot.WithLabelValues(
-            c.nodeLabels["endpoint"],
-            "finalized",
-        ).Set(float64(localSlot))
-        log.Printf("Local slot: %d", localSlot)
-    }()
-
-    // Get reference node slot
-    wg.Add(1)
-    go func() {
-        defer wg.Done()
-        err := c.referenceClient.Call(ctx, "getSlot", []interface{}{
-            map[string]string{"commitment": "finalized"},
-        }, &refSlot)
-
-        if err != nil {
-            errCh <- err
-            return
-        }
-
-        c.metrics.NetworkSlot.WithLabelValues(c.nodeLabels["endpoint"]).
-            Set(float64(refSlot))
-
-        if localSlot > 0 && refSlot > 0 {
-            slotDiff := refSlot - localSlot
-            if slotDiff >= 0 {
-                c.metrics.SlotBehind.WithLabelValues(c.nodeLabels["endpoint"]).
-                    Set(float64(slotDiff))
-                log.Printf("Reference slot: %d, Slot behind: %d", refSlot, slotDiff)
-            }
-        }
-    }()
-
-    wg.Wait()
-    close(errCh)
-
-    for err := range errCh {
-        if err != nil {
-            return fmt.Errorf("slot metrics: %w", err)
-        }
-    }
-
-    return nil
-}
-
-func (c *RPCCollector) collectBlockMetrics(ctx context.Context) error {
-    // Get current slot
-    var slot uint64
-    err := c.localClient.Call(ctx, "getSlot", []interface{}{
-        map[string]string{"commitment": "finalized"},
-    }, &slot)
-
-    if err != nil {
-        return fmt.Errorf("get slot: %w", err)
-    }
-
-    c.metrics.BlockHeight.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(slot))
-
-    // Get block time for current slot
-    var blockTime int64
-    err = c.localClient.Call(ctx, "getBlockTime", []interface{}{slot}, &blockTime)
-    if err != nil {
-        return fmt.Errorf("get block time: %w", err)
-    }
-
-    if blockTime > 0 {
-        timeSinceBlock := time.Now().Unix() - blockTime
-        c.metrics.BlockTime.WithLabelValues(c.nodeLabels["endpoint"]).
-            Set(float64(timeSinceBlock))
-        log.Printf("Current block - Slot: %d, Time since block: %d seconds", slot, timeSinceBlock)
-    }
-
-    return nil
-}
-
-func (c *RPCCollector) collectNodeStatus(ctx context.Context) error {
-    // Get node health
     var healthStatus string
     err := c.localClient.Call(ctx, "getHealth", nil, &healthStatus)
     if err != nil {
-        c.metrics.NodeHealth.WithLabelValues(c.nodeLabels["endpoint"]).Set(0)
-        log.Printf("Node health check failed: %v", err)
+        metrics.mu.Lock()
+        metrics.isHealthy = false
+        metrics.mu.Unlock()
+        c.metrics.NodeHealth.WithLabelValues(endpoint).Set(0)
         return fmt.Errorf("get health: %w", err)
     }
 
-    isHealthy := healthStatus == "ok"
+    metrics.mu.Lock()
+    metrics.isHealthy = healthStatus == "ok"
+    metrics.mu.Unlock()
+
     healthValue := 0.0
-    if isHealthy {
+    if metrics.isHealthy {
         healthValue = 1.0
     }
-    c.metrics.NodeHealth.WithLabelValues(c.nodeLabels["endpoint"]).Set(healthValue)
+    c.metrics.NodeHealth.WithLabelValues(endpoint).Set(healthValue)
 
-    // Get node version
     var versionInfo struct {
         SolanaCore string `json:"solana-core"`
     }
     
     if err := c.localClient.Call(ctx, "getVersion", nil, &versionInfo); err != nil {
-        log.Printf("Failed to get node version: %v", err)
         return fmt.Errorf("get version: %w", err)
     }
 
+    metrics.mu.Lock()
+    metrics.version = versionInfo.SolanaCore
+    metrics.mu.Unlock()
+
     c.metrics.NodeVersion.WithLabelValues(
-        c.nodeLabels["endpoint"],
+        endpoint,
         versionInfo.SolanaCore,
     ).Set(1)
 
     return nil
 }
 
-func (c *RPCCollector) collectSystemMetrics(ctx context.Context) error {
-    // Collect memory stats
+func (c *RPCCollector) collectSystemMetrics(ctx context.Context, metrics *collectedMetrics) error {
+    endpoint := c.nodeLabels["endpoint"]
+
     var m runtime.MemStats
     runtime.ReadMemStats(&m)
 
-    c.metrics.SystemMemoryTotal.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(m.Sys))
-    c.metrics.SystemMemoryUsed.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(m.Alloc))
-    c.metrics.SystemHeapAlloc.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(m.HeapAlloc))
+    metrics.mu.Lock()
+    metrics.memoryUsed = m.Alloc
+    metrics.goroutines = runtime.NumGoroutine()
+    metrics.mu.Unlock()
 
-    // Collect goroutine and thread count
-    c.metrics.SystemGoroutines.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(runtime.NumGoroutine()))
-    c.metrics.SystemThreads.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(runtime.NumCPU()))
+    c.metrics.SystemMemoryUsed.WithLabelValues(endpoint).Set(float64(m.Alloc))
+    c.metrics.SystemHeapAlloc.WithLabelValues(endpoint).Set(float64(m.HeapAlloc))
+    c.metrics.SystemGoroutines.WithLabelValues(endpoint).Set(float64(runtime.NumGoroutine()))
+    c.metrics.SystemThreads.WithLabelValues(endpoint).Set(float64(runtime.NumCPU()))
 
-    // Collect file descriptor stats
     var rLimit syscall.Rlimit
     err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
     if err != nil {
         return fmt.Errorf("get fd limits: %w", err)
     }
 
-    c.metrics.SystemMaxFDs.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(rLimit.Max))
-    c.metrics.SystemOpenFDs.WithLabelValues(c.nodeLabels["endpoint"]).
-        Set(float64(rLimit.Cur))
+    metrics.mu.Lock()
+    metrics.maxFDs = uint64(rLimit.Max)
+    metrics.openFDs = uint64(rLimit.Cur)
+    metrics.mu.Unlock()
 
-    // Collect GC stats
-    c.metrics.SystemGCDuration.WithLabelValues(c.nodeLabels["endpoint"]).
-        Observe(float64(m.PauseTotalNs) / float64(time.Second))
+    c.metrics.SystemMaxFDs.WithLabelValues(endpoint).Set(float64(rLimit.Max))
+    c.metrics.SystemOpenFDs.WithLabelValues(endpoint).Set(float64(rLimit.Cur))
 
     return nil
 }
 
-// Stop implements the StoppableCollector interface
 func (c *RPCCollector) Stop() error {
-    // Nothing to clean up for RPC collector
     return nil
 }

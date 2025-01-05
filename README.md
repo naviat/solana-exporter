@@ -13,13 +13,13 @@ This implementation includes:
 - Uptime tracking
 - Restart monitoring
 
-2. Slot and Block Metrics:
+1. Slot and Block Metrics:
 
 - Slot heights and differences
 - Block processing times
 - Chain synchronization status
 
-3. System Resource Metrics:
+1. System Resource Metrics:
 
 - CPU usage by core
 - Memory usage stats
